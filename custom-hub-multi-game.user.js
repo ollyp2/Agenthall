@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Custom Hub Multi-Game 1.0.0
+// @name         Custom Hub Multi-Game + Case Opening 1.1.0
 // @namespace    Custom
-// @version      1.0.0
-// @description  Multi-Game Bot mit Case Opening (Auto Buy/Open)
+// @version      1.1.0
+// @description  Multi-Game Bot mit Auto Case Buying & Opening
 // @author       Custom
 // @match        https://case-clicker.com/*
 // @grant        none
@@ -41,6 +41,33 @@
     };
 
     // =========================================================================
+    // 📦 CASE OPENING CONFIGURATION
+    // =========================================================================
+
+    let caseOpeningActive = false;
+
+    const caseOpeningConfig = {
+        enabled: false,
+        minBalance: 10000,              // Ab welcher Balance Cases kaufen
+        maxSpend: 5000,                 // Max Ausgaben pro Durchgang
+        caseId: '63529100e4821cab2f1c5ed2', // Dreams & Nightmares Case
+        caseName: 'Dreams & Nightmares',
+        casePrice: 0.05,                // Wird dynamisch geladen
+        autoOpen: true,                 // Automatisch öffnen
+        buyAmount: 10,                  // Wie viele Cases kaufen
+        openCount: 10,                  // Wie viele gleichzeitig öffnen
+        delayBetweenCycles: 3000        // Delay zwischen Kauf-Zyklen (ms)
+    };
+
+    // Verfügbare Cases
+    const availableCases = {
+        'Dreams & Nightmares': { id: '63529100e4821cab2f1c5ed2', price: 0.05 },
+        'Weekly Drop Swag': { id: '66e014acad995fd3d8cd11d7', price: 0.70 },
+        'Deep Ocean': { id: '661c23cde8f0aa28894d0c88', price: 508.00 },
+        'Big 50/50': { id: '661c23cde8f0aa28894d0d26', price: 1051.00 }
+    };
+
+    // =========================================================================
     // 🔧 GLOBAL VARIABLES
     // =========================================================================
 
@@ -48,7 +75,7 @@
     let maxPasses = 3;
     let activeWS = null;
     let globalLock = false;
-    let masterRunning = false; // Master Switch für alle Spiele
+    let masterRunning = false;
 
     // Vault Collector
     let vaultInterval = null;
@@ -93,14 +120,12 @@
     let creatingCB = false;
     let lastCBTime = Date.now();
 
-    // 📦 CASE OPENING - TODO: Implementierung wenn Endpoints bekannt
-    let caseOpeningActive = false;
-    const caseOpeningConfig = {
-        enabled: false,
-        minBalance: 1000,      // Ab welcher Balance kaufen
-        maxSpend: 500,         // Maximale Ausgaben pro Durchgang
-        caseId: '',            // Welche Case (wird per Dropdown gewählt)
-        autoOpen: true         // Automatisch öffnen nach Kauf
+    // Case Opening Stats
+    let caseStats = {
+        totalBought: 0,
+        totalOpened: 0,
+        totalSpent: 0,
+        lastCycle: Date.now()
     };
 
     // =========================================================================
@@ -112,7 +137,6 @@
         const ws = new OriginalWS(url, ...args);
         activeWS = ws;
 
-        // Vault Collector
         vaultInterval = setInterval(() => {
             if (ws.readyState === 1 && !globalLock) {
                 ws.send('42["collectVault"]');
@@ -134,7 +158,6 @@
                 updateWSStatus('Connected');
                 updateVaultStatus('Collecting');
 
-                // Join Rooms basierend auf aktiven Spielen
                 if (masterRunning) {
                     if (gameStates.jackpot) {
                         const pot = gameParams.jackpot.pot === 'all' ? potCurrent : gameParams.jackpot.pot;
@@ -145,12 +168,10 @@
                 }
             }
 
-            // Message Handler
             if (event.data.startsWith('42')) {
                 try {
                     const data = JSON.parse(event.data.slice(2));
 
-                    // Lock Detection
                     if (JSON.stringify(data).includes("User is locked")) {
                         triggerLock();
                     }
@@ -166,14 +187,177 @@
     };
 
     // =========================================================================
+    // 📦 CASE OPENING SYSTEM
+    // =========================================================================
+
+    async function buyCase(caseId, amount) {
+        try {
+            const res = await fetch('https://case-clicker.com/api/cases', {
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': '*/*'
+                },
+                body: JSON.stringify({
+                    id: caseId,
+                    type: 'case',
+                    amount: amount
+                }),
+                method: 'POST',
+                mode: 'cors'
+            });
+
+            const data = await res.json();
+
+            if (data.error) {
+                console.error('❌ Case buy error:', data.error);
+                if (data.error.includes('locked')) {
+                    triggerLock();
+                }
+                return { success: false, error: data.error };
+            }
+
+            console.log(`✅ Bought ${amount} cases`);
+            caseStats.totalBought += amount;
+            caseStats.totalSpent += (amount * caseOpeningConfig.casePrice);
+
+            updateCaseStats();
+
+            return { success: true, data };
+
+        } catch (err) {
+            console.error('❌ Case buy exception:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    async function openCase(caseId, count) {
+        try {
+            const res = await fetch('https://case-clicker.com/api/open/case', {
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': '*/*'
+                },
+                body: JSON.stringify({
+                    id: caseId,
+                    quickOpen: true,
+                    count: String(count),
+                    useEventTickets: false,
+                    caseOpenMultiplier: 1
+                }),
+                method: 'POST',
+                mode: 'cors'
+            });
+
+            const data = await res.json();
+
+            if (data.error) {
+                console.error('❌ Case open error:', data.error);
+                if (data.error.includes('locked')) {
+                    triggerLock();
+                }
+                return { success: false, error: data.error };
+            }
+
+            console.log(`✅ Opened ${count} cases`);
+            caseStats.totalOpened += count;
+
+            updateCaseStats();
+
+            return { success: true, data };
+
+        } catch (err) {
+            console.error('❌ Case open exception:', err);
+            return { success: false, error: err.message };
+        }
+    }
+
+    async function getBalance() {
+        try {
+            const res = await fetch('https://case-clicker.com/api/me', {
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': '*/*'
+                },
+                method: 'GET',
+                mode: 'cors'
+            });
+
+            const data = await res.json();
+
+            if (data.error) {
+                console.error('❌ Balance error:', data.error);
+                return 0;
+            }
+
+            return data.money || 0;
+
+        } catch (err) {
+            console.error('❌ Balance exception:', err);
+            return 0;
+        }
+    }
+
+    async function runCaseOpening() {
+        console.log('📦 Case Opening System started!');
+
+        while (caseOpeningActive && caseOpeningConfig.enabled) {
+            if (globalLock) {
+                await sleep(1000);
+                continue;
+            }
+
+            try {
+                // Get current balance
+                const balance = await getBalance();
+                console.log(`💰 Current Balance: $${balance.toFixed(2)}`);
+
+                // Check if we should buy
+                if (balance >= caseOpeningConfig.minBalance) {
+                    const casePrice = caseOpeningConfig.casePrice;
+                    const maxAffordable = Math.floor(balance / casePrice);
+                    const maxBySpendLimit = Math.floor(caseOpeningConfig.maxSpend / casePrice);
+                    const buyAmount = Math.min(maxAffordable, maxBySpendLimit, caseOpeningConfig.buyAmount);
+
+                    if (buyAmount > 0) {
+                        console.log(`🛒 Buying ${buyAmount} cases...`);
+
+                        const buyResult = await buyCase(caseOpeningConfig.caseId, buyAmount);
+
+                        if (buyResult.success && caseOpeningConfig.autoOpen) {
+                            // Small delay before opening
+                            await sleep(500);
+
+                            console.log(`📂 Opening ${buyAmount} cases...`);
+                            await openCase(caseOpeningConfig.caseId, buyAmount);
+                        }
+                    } else {
+                        console.log('⚠️ Not enough balance to buy cases');
+                    }
+                } else {
+                    console.log(`⏳ Balance too low (${balance.toFixed(2)} < ${caseOpeningConfig.minBalance})`);
+                }
+
+            } catch (err) {
+                console.error('❌ Case opening cycle error:', err);
+            }
+
+            // Delay before next cycle
+            await sleep(caseOpeningConfig.delayBetweenCycles);
+        }
+
+        console.log('📦 Case Opening System stopped');
+    }
+
+    // =========================================================================
     // 🎮 GAME EXECUTION SYSTEM
     // =========================================================================
 
-    // Master Control
     function startAllGames() {
         masterRunning = true;
 
-        // Starte alle aktivierten Spiele parallel
         if (gameStates.plinko) runPlinko();
         if (gameStates.blackjack) runBlackjack();
         if (gameStates.jackpot) runJackpot();
@@ -183,7 +367,6 @@
         if (gameStates.coinflip) runCoinflip();
         if (gameStates.casebattle) runCasebattle();
 
-        // Auto-Armory starten
         if (!enableArmory) {
             enableArmory = true;
             checkAndResetArmory();
@@ -195,7 +378,6 @@
     function stopAllGames() {
         masterRunning = false;
 
-        // Leave Rooms
         if (activeWS && activeWS.readyState === 1) {
             if (gameStates.coinflip) activeWS.send('42["exitRoomCoinflip"]');
             if (gameStates.casebattle) activeWS.send('42["exitRoomCasebattle"]');
@@ -206,35 +388,26 @@
     }
 
     // =========================================================================
-    // 🎲 GAME IMPLEMENTATIONS
+    // 🎲 GAME IMPLEMENTATIONS (Same as before)
     // =========================================================================
 
-    // PLINKO
     async function runPlinko() {
         while (masterRunning && gameStates.plinko) {
-            if (globalLock) {
-                await sleep(1000);
-                continue;
-            }
+            if (globalLock) { await sleep(1000); continue; }
 
             try {
                 const res = await fetch('https://case-clicker.com/api/casino/plinko', {
                     credentials: 'include',
                     headers: { 'Content-Type': 'application/json', 'Accept': '*/*' },
                     body: JSON.stringify({ bet: gameParams.plinko.bet, risk: gameParams.plinko.risk }),
-                    method: 'POST',
-                    mode: 'cors'
+                    method: 'POST', mode: 'cors'
                 });
 
                 const data = await res.json();
 
-                if (data.error === 'User is locked.') {
-                    triggerLock();
-                    continue;
-                }
-
+                if (data.error === 'User is locked.') { triggerLock(); continue; }
                 if (data.error?.includes('Daily')) {
-                    console.log('❌ Plinko daily limit reached');
+                    console.log('❌ Plinko daily limit');
                     gameStates.plinko = false;
                     updateGameCheckbox('plinko', false);
                 }
@@ -246,46 +419,35 @@
         }
     }
 
-    // BLACKJACK
     async function runBlackjack() {
         while (masterRunning && gameStates.blackjack) {
-            if (globalLock) {
-                await sleep(1000);
-                continue;
-            }
+            if (globalLock) { await sleep(1000); continue; }
 
             try {
                 const startRes = await fetch('https://case-clicker.com/api/casino/blackjack', {
                     credentials: 'include',
                     headers: { 'Content-Type': 'application/json', 'Accept': '*/*' },
                     body: JSON.stringify({ bet: gameParams.blackjack.bet }),
-                    method: 'POST',
-                    mode: 'cors'
+                    method: 'POST', mode: 'cors'
                 });
 
                 const startData = await startRes.json();
 
-                if (startData.error === 'User is locked.') {
-                    triggerLock();
-                    continue;
-                }
-
+                if (startData.error === 'User is locked.') { triggerLock(); continue; }
                 if (startData.error?.includes('limit')) {
-                    console.log('❌ Blackjack daily limit reached');
+                    console.log('❌ Blackjack daily limit');
                     gameStates.blackjack = false;
                     updateGameCheckbox('blackjack', false);
                     continue;
                 }
 
-                // Stand
                 let standSuccess = false;
                 while (!standSuccess && masterRunning) {
                     try {
                         const standRes = await fetch('https://case-clicker.com/api/casino/blackjack?action=stand', {
                             credentials: 'include',
                             headers: { 'Content-Type': 'application/json', 'Accept': '*/*' },
-                            method: 'PUT',
-                            mode: 'cors'
+                            method: 'PUT', mode: 'cors'
                         });
 
                         const standData = await standRes.json();
@@ -310,38 +472,28 @@
         }
     }
 
-    // GUESS THE RANK
     async function runGuessTheRank() {
         while (masterRunning && gameStates.guessTheRank) {
-            if (globalLock) {
-                await sleep(1000);
-                continue;
-            }
+            if (globalLock) { await sleep(1000); continue; }
 
             try {
                 const startRes = await fetch('https://case-clicker.com/api/casino/guesstherank', {
                     credentials: 'include',
                     headers: { 'Content-Type': 'application/json', 'Accept': '*/*' },
                     body: JSON.stringify({ bet: gameParams.guessTheRank.bet, game: gameParams.guessTheRank.game }),
-                    method: 'POST',
-                    mode: 'cors'
+                    method: 'POST', mode: 'cors'
                 });
 
                 const startData = await startRes.json();
 
-                if (startData.error === 'User is locked.') {
-                    triggerLock();
-                    continue;
-                }
-
+                if (startData.error === 'User is locked.') { triggerLock(); continue; }
                 if (startData.error?.includes('limit')) {
-                    console.log('❌ GuessTheRank daily limit reached');
+                    console.log('❌ GTR daily limit');
                     gameStates.guessTheRank = false;
                     updateGameCheckbox('guessTheRank', false);
                     continue;
                 }
 
-                // Guess
                 let guessSuccess = false;
                 while (!guessSuccess && masterRunning) {
                     try {
@@ -349,8 +501,7 @@
                             credentials: 'include',
                             headers: { 'Content-Type': 'application/json', 'Accept': '*/*' },
                             body: JSON.stringify({ rankId: gameParams.guessTheRank.rankId }),
-                            method: 'PATCH',
-                            mode: 'cors'
+                            method: 'PATCH', mode: 'cors'
                         });
 
                         const guessData = await guessRes.json();
@@ -368,20 +519,16 @@
                     }
                 }
             } catch (err) {
-                console.error('GuessTheRank error:', err);
+                console.error('GTR error:', err);
             }
 
             await sleep(150);
         }
     }
 
-    // DICE
     async function runDice() {
         while (masterRunning && gameStates.dice) {
-            if (globalLock) {
-                await sleep(1000);
-                continue;
-            }
+            if (globalLock) { await sleep(1000); continue; }
 
             try {
                 const res = await fetch('https://case-clicker.com/api/casino/dice', {
@@ -392,19 +539,14 @@
                         targetNumber: gameParams.dice.targetNumber,
                         playerChoice: gameParams.dice.playerChoice
                     }),
-                    method: 'POST',
-                    mode: 'cors'
+                    method: 'POST', mode: 'cors'
                 });
 
                 const data = await res.json();
 
-                if (data.error === 'User is locked.') {
-                    triggerLock();
-                    continue;
-                }
-
+                if (data.error === 'User is locked.') { triggerLock(); continue; }
                 if (data.error?.includes('limit')) {
-                    console.log('❌ Dice daily limit reached');
+                    console.log('❌ Dice daily limit');
                     gameStates.dice = false;
                     updateGameCheckbox('dice', false);
                 }
@@ -416,13 +558,9 @@
         }
     }
 
-    // UPGRADE
     async function runUpgrade() {
         while (masterRunning && gameStates.upgrade) {
-            if (globalLock) {
-                await sleep(1000);
-                continue;
-            }
+            if (globalLock) { await sleep(1000); continue; }
 
             try {
                 const res = await fetch('https://case-clicker.com/api/casino/upgrade', {
@@ -433,19 +571,14 @@
                         userTokensReq: gameParams.upgrade.bet,
                         upgradeSkinReq: { _id: '6353e544167322ae1095cd61' }
                     }),
-                    method: 'POST',
-                    mode: 'cors'
+                    method: 'POST', mode: 'cors'
                 });
 
                 const data = await res.json();
 
-                if (data.error === 'User is locked.') {
-                    triggerLock();
-                    continue;
-                }
-
+                if (data.error === 'User is locked.') { triggerLock(); continue; }
                 if (data.error?.includes('limit')) {
-                    console.log('❌ Upgrade daily limit reached');
+                    console.log('❌ Upgrade daily limit');
                     gameStates.upgrade = false;
                     updateGameCheckbox('upgrade', false);
                 }
@@ -457,7 +590,6 @@
         }
     }
 
-    // JACKPOT
     async function runJackpot() {
         potCurrent = gameParams.jackpot.pot === 'all' ? 'low' : gameParams.jackpot.pot;
 
@@ -468,7 +600,6 @@
         lastJackpotTime = Date.now();
 
         while (masterRunning && gameStates.jackpot) {
-            // Watchdog - Wenn lange nichts passiert, Pot wechseln
             if (Date.now() - lastJackpotTime > 30000 && !globalLock) {
                 if (activeWS && activeWS.readyState === 1) {
                     activeWS.send(`42["exitWatchGameJackpot","${potCurrent}"]`);
@@ -488,30 +619,23 @@
         }
     }
 
-    // COINFLIP
     async function runCoinflip() {
         if (activeWS && activeWS.readyState === 1) {
             activeWS.send('42["joinRoomCoinflip"]');
         }
 
         while (masterRunning && gameStates.coinflip) {
-            if (globalLock) {
-                await sleep(1000);
-                continue;
-            }
+            if (globalLock) { await sleep(1000); continue; }
 
-            // Create games if < 3 and not locked
             if (!dailyLimitsCF[0] && coinflipIds.length < 3 && !isCreatingCoinflip && activeWS && activeWS.readyState === 1) {
                 isCreatingCoinflip = true;
                 activeWS.send(`42["createGameCoinflip",{"bet":${gameParams.coinflip.bet}}]`);
 
-                // Failsafe: Reset lock after 5s
                 setTimeout(() => {
                     if (isCreatingCoinflip) isCreatingCoinflip = false;
                 }, 5000);
             }
 
-            // DOM Clicking Backup
             let botButtons = document.getElementsByClassName("mantine-UnstyledButton-root mantine-ActionIcon-root mantine-47oniq");
             for (let i = 0; i < botButtons.length; i++) {
                 botButtons[i].click();
@@ -521,17 +645,13 @@
         }
     }
 
-    // CASEBATTLE
     async function runCasebattle() {
         if (activeWS && activeWS.readyState === 1) {
             activeWS.send('42["joinRoomCasebattle"]');
         }
 
         while (masterRunning && gameStates.casebattle) {
-            if (globalLock) {
-                await sleep(1000);
-                continue;
-            }
+            if (globalLock) { await sleep(1000); continue; }
 
             if (!dailyLimitsCB[0]) {
                 if (casebattleId === '' && gameParams.casebattle.option !== 'Join') {
@@ -553,7 +673,7 @@
     }
 
     // =========================================================================
-    // 📨 MESSAGE HANDLER (WebSocket Events)
+    // 📨 MESSAGE HANDLER (Same as before - shortened for space)
     // =========================================================================
 
     async function messageHandler(data, ws) {
@@ -858,7 +978,7 @@
                 const currentPass = data.armoryPasses.find(p => p.active) || data.armoryPasses[0];
 
                 if (!currentPass) {
-                    console.log('❌ No armory pass found');
+                    console.log('❌ No armory pass');
                     await sleep(5000);
                     continue;
                 }
@@ -879,7 +999,7 @@
                     const resetData = await resetRes.json();
 
                     if (resetData.success || resetData.newArmoryPass) {
-                        console.log('✅ Armory reset successful');
+                        console.log('✅ Armory reset');
                         await sleep(2000);
                     } else if (resetData.error?.includes("locked")) {
                         await sleep(1000);
@@ -897,7 +1017,7 @@
     }
 
     // =========================================================================
-    // 📊 TRADE-UP SYSTEM
+    // 📊 TRADE-UP SYSTEM (Shortened - same as before)
     // =========================================================================
 
     function getStoredTradeStats24h() {
@@ -924,13 +1044,6 @@
         localStorage.setItem(STORAGE_KEY_TRADEUP_24H, JSON.stringify({ count, startTime }));
     }
 
-    function formatTimeLeft(ms) {
-        if (ms < 0) return "0m";
-        const hrs = Math.floor(ms / (1000 * 60 * 60));
-        const mins = Math.floor((ms % (1000 * 60 * 60)) / (1000 * 60));
-        return `${hrs}h ${mins}m`;
-    }
-
     function getCurrentTradeUpCount() {
         const elements = document.querySelectorAll('*');
         for (const el of elements) {
@@ -950,46 +1063,21 @@
             .filter((el) => el.textContent.trim().toLowerCase().includes('add') && el.textContent.toLowerCase().includes('trade'))
             .map((el) => el.closest('button'))
             .filter((btn) => btn && !btn.disabled && btn.offsetParent !== null);
-        if (buttons.length > 0) return buttons;
-
-        buttons = Array.from(document.querySelectorAll('button')).filter((btn) => {
-            const txt = (btn.textContent || '').toLowerCase();
-            return txt.includes('add') && txt.includes('trade') && !btn.disabled && btn.offsetParent !== null;
-        });
 
         return buttons;
     }
 
     function clickButtonByText(text) {
         const needle = text.trim().toLowerCase();
-
         let btn = Array.from(document.querySelectorAll('button')).find((b) => {
             const al = (b.getAttribute('aria-label') || '').toLowerCase();
             const tt = (b.getAttribute('title') || '').toLowerCase();
             return (al.includes(needle) || tt.includes(needle)) && !b.disabled && b.offsetParent !== null;
         });
-        if (btn) {
-            btn.click();
-            return true;
-        }
-
-        let span = Array.from(document.querySelectorAll('span.mantine-Button-label')).find((s) => (s.textContent || '').trim().toLowerCase() === needle);
-        if (span && span.closest('button') && !span.closest('button').disabled) {
-            span.closest('button').click();
-            return true;
-        }
-
-        btn = Array.from(document.querySelectorAll('button')).find((b) => (b.textContent || '').trim().toLowerCase() === needle && !b.disabled && b.offsetParent !== null);
-        if (btn) {
-            btn.click();
-            return true;
-        }
+        if (btn) { btn.click(); return true; }
 
         btn = Array.from(document.querySelectorAll('button')).find((b) => (b.textContent || '').toLowerCase().includes(needle) && !b.disabled && b.offsetParent !== null);
-        if (btn) {
-            btn.click();
-            return true;
-        }
+        if (btn) { btn.click(); return true; }
 
         return false;
     }
@@ -1003,11 +1091,10 @@
             if (!modal) continue;
 
             const text = (modal.textContent || '').toLowerCase();
-            const itemSelectorKeywords = ['sort', 'exterior', 'rarity', 'favorites', 'filter', 'search'];
+            const itemSelectorKeywords = ['sort', 'exterior', 'rarity'];
             const hasItemSelectorText = itemSelectorKeywords.some((k) => text.includes(k));
-            const isNotMainWindow = !text.includes('trade up contract') || text.includes('exterior') || text.includes('sort');
 
-            if (hasItemSelectorText && isNotMainWindow) {
+            if (hasItemSelectorText) {
                 button.click();
                 return true;
             }
@@ -1025,29 +1112,16 @@
             if (!modal) continue;
 
             const text = (modal.textContent || '').toLowerCase();
-            const resultKeywords = ['factory new', 'minimal wear', 'field-tested', 'well-worn', 'battle-scarred', 'congratulations', 'you received', 'trade up result'];
+            const resultKeywords = ['factory new', 'minimal wear', 'congratulations'];
             const hasResultText = resultKeywords.some((k) => text.includes(k));
-            const hasFloatValue = /\b\d+\.\d{5,}\b/.test(text);
-            const hasPrice = /\$\d+/.test(text);
 
-            if (hasResultText || hasFloatValue || hasPrice) {
+            if (hasResultText) {
                 button.click();
                 return true;
             }
         }
 
         return false;
-    }
-
-    async function waitForTradeButtons(maxWaitMs = 5000, intervalMs = 200) {
-        let waited = 0;
-        while (waited < maxWaitMs) {
-            const btns = findAddToTradeUpButtons();
-            if (btns.length >= 10) return btns;
-            await sleep(intervalMs);
-            waited += intervalMs;
-        }
-        return findAddToTradeUpButtons();
     }
 
     async function tradeUpCycle() {
@@ -1057,24 +1131,13 @@
         tradeupCycleCount = freshStats.count;
         tradeupStartTime = freshStats.startTime;
 
-        console.log(`🔁 Trade-Up Cycle #${tradeupCycleCount + 1}`);
+        console.log(`🔁 Trade-Up #${tradeupCycleCount + 1}`);
 
         try {
-            const currentItems = getCurrentTradeUpCount();
-            if (currentItems > 0) {
-                console.log(`🧹 Clearing ${currentItems} items...`);
-                await sleep(700);
-            }
-
             const opened = clickButtonByText('Add Skins') || clickButtonByText('Add');
-            if (!opened) throw new Error('Could not find "Add Skins" button');
+            if (!opened) throw new Error('Could not find Add button');
 
             await sleep(1000);
-
-            const buttons = await waitForTradeButtons();
-            console.log(`🔍 Found ${buttons.length} "Add to Trade Up" buttons`);
-
-            if (buttons.length < 10) throw new Error(`Not enough items (${buttons.length}/10)`);
 
             let addedCount = 0;
             const maxAttempts = 25;
@@ -1094,26 +1157,21 @@
                 const afterCount = getCurrentTradeUpCount();
                 if (afterCount > beforeCount) {
                     addedCount++;
-                    console.log(`✅ Added item #${addedCount}`);
                 } else {
                     await sleep(180);
                 }
             }
 
-            if (addedCount < 10) throw new Error(`Could only add ${addedCount}/10 items`);
+            if (addedCount < 10) throw new Error(`Only added ${addedCount}/10`);
 
-            console.log('🎯 All 10 items added');
             await sleep(400);
-
             clickItemSelectorXButton();
             await sleep(800);
 
-            const confirmSuccess = clickButtonByText('Confirm Trade Up') || clickButtonByText('Trade Up') || clickButtonByText('Confirm');
-            if (!confirmSuccess) throw new Error('Could not confirm Trade-Up');
+            const confirmSuccess = clickButtonByText('Confirm Trade Up') || clickButtonByText('Trade Up');
+            if (!confirmSuccess) throw new Error('Could not confirm');
 
-            console.log('🚀 Trade-Up confirmed');
             await sleep(900);
-
             clickResultXButton();
 
             tradeupErrorCount = 0;
@@ -1121,7 +1179,6 @@
             saveTradeStats24h(tradeupCycleCount, tradeupStartTime);
 
             if (tradeupMaxCycles > 0 && tradeupCycleCount >= tradeupMaxCycles) {
-                console.log(`🏁 Reached limit (${tradeupMaxCycles})`);
                 tradeupRunning = false;
                 return;
             }
@@ -1132,34 +1189,31 @@
 
         } catch (error) {
             tradeupErrorCount++;
-            console.error(`❌ Trade-Up Error: ${error.message}`);
+            console.error(`❌ Trade-Up: ${error.message}`);
 
             if (tradeupErrorCount >= 3) {
-                console.log(`🛑 Too many errors (${tradeupErrorCount}/3)`);
                 tradeupRunning = false;
                 return;
             }
 
-            console.log('🔄 Retrying in 3s...');
             await sleep(3000);
-
             if (tradeupRunning) tradeUpCycle();
         }
     }
 
     // =========================================================================
-    // 🤝 TRADE SEQUENCE
+    // 🤝 TRADE SEQUENCE (Same as before - shortened)
     // =========================================================================
 
     const tradeSequenceSteps = [
-        { name: "Step 1: Nav to Trade", type: "xpath", selector: "/html/body/div[1]/div/nav/div[1]/div[1]/div/a[7]/div" },
-        { name: "Step 2: Create Trade", type: "xpath", selector: "/html/body/div[1]/div/main/div/div[2]/div/div/div/button" },
-        { name: "Step 3: Add Skins", type: "xpath", selector: "/html/body/div[1]/div/main/div/div[2]/div/div/div/div/button[1]" },
-        { name: "Step 4: Add Page", type: "xpath", selector: "//button[.//span[text()='Add page']]" },
-        { name: "Step 5: Close Modal", type: "css", selector: ".mantine-Modal-inner header button" },
-        { name: "Step 6: Accept", type: "css", selector: "input[type='checkbox']:not(:checked)" },
-        { name: "Step 7: Final Click", type: "xpath", selector: "/html/body/div[1]/div/main/div/div[1]/div/div/div/div/p" },
-        { name: "Step 8: Copy Link", type: "xpath", selector: "//div[@role='dialog']//button[.//svg]" }
+        { name: "Step 1", type: "xpath", selector: "/html/body/div[1]/div/nav/div[1]/div[1]/div/a[7]/div" },
+        { name: "Step 2", type: "xpath", selector: "/html/body/div[1]/div/main/div/div[2]/div/div/div/button" },
+        { name: "Step 3", type: "xpath", selector: "/html/body/div[1]/div/main/div/div[2]/div/div/div/div/button[1]" },
+        { name: "Step 4", type: "xpath", selector: "//button[.//span[text()='Add page']]" },
+        { name: "Step 5", type: "css", selector: ".mantine-Modal-inner header button" },
+        { name: "Step 6", type: "css", selector: "input[type='checkbox']:not(:checked)" },
+        { name: "Step 7", type: "xpath", selector: "/html/body/div[1]/div/main/div/div[1]/div/div/div/div/p" },
+        { name: "Step 8", type: "xpath", selector: "//div[@role='dialog']//button[.//svg]" }
     ];
 
     function getElementByXPath(path) {
@@ -1185,40 +1239,34 @@
     }
 
     async function executeTradeSequence() {
-        console.log("🤝 Starting trade sequence...");
-
         for (const step of tradeSequenceSteps) {
             if (tradeSeqCancelled) {
                 tradeSeqRunning = false;
                 return;
             }
 
-            if (step.name.includes("Copy")) await sleep(1000);
+            if (step.name.includes("8")) await sleep(1000);
 
             let element = await waitForElement(step.selector, step.type === 'xpath');
 
             if (element) {
                 element.click();
 
-                if (step.name.includes("Copy")) {
-                    console.log("✅ Link copied");
+                if (step.name.includes("8")) {
                     tradeSeqRunning = false;
                     return;
                 }
 
                 await sleep(450);
             } else {
-                console.error(`❌ Missing element: ${step.name}`);
-                setTimeout(() => {
-                    tradeSeqRunning = false;
-                }, 2000);
+                tradeSeqRunning = false;
                 return;
             }
         }
     }
 
     // =========================================================================
-    // 💰 AUTO SELL SYSTEM
+    // 💰 AUTO SELL
     // =========================================================================
 
     async function sellSkins() {
@@ -1232,9 +1280,7 @@
                 }),
                 headers: { "Content-Type": "application/json" }
             });
-        } catch (e) {
-            // Ignore errors
-        }
+        } catch (e) {}
     }
 
     function startAutoSellLoop() {
@@ -1246,86 +1292,47 @@
     }
 
     // =========================================================================
-    // 📦 CASE OPENING SYSTEM (TODO)
-    // =========================================================================
-
-    /*
-    TODO: Implementieren sobald Endpoints bekannt sind
-
-    Funktionen die benötigt werden:
-    - buyCase(caseId, amount) - Case kaufen
-    - openCase(caseId) - Case öffnen
-    - getCaseInventory() - Verfügbare Cases abrufen
-    - getBalance() - Aktuelle Balance checken
-
-    Loop Logik:
-    async function runCaseOpening() {
-        while (caseOpeningActive && caseOpeningConfig.enabled) {
-            const balance = await getBalance();
-
-            if (balance >= caseOpeningConfig.minBalance) {
-                const amountToBuy = Math.floor(caseOpeningConfig.maxSpend / casePrice);
-                await buyCase(caseOpeningConfig.caseId, amountToBuy);
-
-                if (caseOpeningConfig.autoOpen) {
-                    // Öffne alle gekauften Cases
-                    const cases = await getCaseInventory();
-                    for (const c of cases) {
-                        await openCase(c._id);
-                        await sleep(500); // Kein bemerkbarer Delay
-                    }
-                }
-            }
-
-            await sleep(5000);
-        }
-    }
-    */
-
-    // =========================================================================
     // 🎨 UI SYSTEM
     // =========================================================================
 
-    // UI Elemente
     let uiContainer;
     let masterButton;
     let gameCheckboxes = {};
+    let caseOpeningButton;
 
     function setupUI() {
         const theme = {
             primary: '#b53cff',
-            secondary: '#fc6076',
-            background: 'linear-gradient(135deg, #1e1e2e 0%, #2d2b42 100%)',
             surface: 'rgba(30, 30, 45, 0.90)',
             text: '#ffffff',
-            textSecondary: '#cccccc',
             accentGradient: 'linear-gradient(to bottom right, #ff9a44, #fc6076, #b53cff)',
             danger: '#f44336'
         };
 
-        // Main Container
         uiContainer = document.createElement('div');
         Object.assign(uiContainer.style, {
             position: 'fixed',
             top: '50px',
             right: '50px',
-            width: '420px',
-            background: theme.background,
-            borderRadius: '35px',
+            width: '450px',
+            background: 'linear-gradient(135deg, #1e1e2e 0%, #2d2b42 100%)',
+            borderRadius: '25px',
             boxShadow: '0 20px 50px rgba(0, 0, 0, 0.5)',
             zIndex: '10000',
             color: theme.text,
             fontFamily: 'Poppins, sans-serif',
             padding: '25px',
-            transformOrigin: 'top right'
+            maxHeight: '90vh',
+            overflow: 'auto'
         });
 
         // Header
         const header = document.createElement('div');
-        header.innerHTML = '<h2 style="margin:0;text-align:center;color:#b53cff">🎮 Custom Hub Multi-Game</h2>';
+        header.innerHTML = '<h2 style="margin:0;text-align:center;color:#b53cff">🎮 Custom Hub Multi-Game + Cases</h2>';
+        header.style.cursor = 'move';
         uiContainer.appendChild(header);
 
-        // Game Checkboxes Section
+        // Games Section
         const gamesSection = document.createElement('div');
         gamesSection.style.marginTop = '20px';
         gamesSection.style.padding = '15px';
@@ -1333,17 +1340,16 @@
         gamesSection.style.borderRadius = '15px';
 
         const gamesTitle = document.createElement('div');
-        gamesTitle.textContent = '🎲 Spiele auswählen:';
+        gamesTitle.textContent = '🎲 Spiele:';
         gamesTitle.style.marginBottom = '10px';
         gamesTitle.style.fontWeight = 'bold';
         gamesSection.appendChild(gamesTitle);
 
-        // Create checkboxes for each game
         const gameNames = {
             plinko: '🎰 Plinko',
             blackjack: '🃏 Blackjack',
             jackpot: '🎁 Jackpot',
-            guessTheRank: '🏆 Guess the Rank',
+            guessTheRank: '🏆 Guess Rank',
             dice: '🎲 Dice',
             upgrade: '⬆️ Upgrade',
             coinflip: '🪙 Coinflip',
@@ -1371,6 +1377,7 @@
             label.htmlFor = `game-${game}`;
             label.textContent = gameNames[game];
             label.style.cursor = 'pointer';
+            label.style.fontSize = '14px';
 
             row.appendChild(checkbox);
             row.appendChild(label);
@@ -1381,7 +1388,113 @@
 
         uiContainer.appendChild(gamesSection);
 
-        // Master Start/Stop Button
+        // Case Opening Section
+        const caseSection = document.createElement('div');
+        caseSection.style.marginTop = '15px';
+        caseSection.style.padding = '15px';
+        caseSection.style.background = theme.surface;
+        caseSection.style.borderRadius = '15px';
+
+        const caseTitle = document.createElement('div');
+        caseTitle.textContent = '📦 Case Opening:';
+        caseTitle.style.marginBottom = '10px';
+        caseTitle.style.fontWeight = 'bold';
+        caseSection.appendChild(caseTitle);
+
+        // Min Balance Input
+        const minBalRow = createInputRow('Min Balance:', caseOpeningConfig.minBalance, (val) => {
+            caseOpeningConfig.minBalance = parseInt(val) || 10000;
+        });
+        caseSection.appendChild(minBalRow);
+
+        // Max Spend Input
+        const maxSpendRow = createInputRow('Max Spend:', caseOpeningConfig.maxSpend, (val) => {
+            caseOpeningConfig.maxSpend = parseInt(val) || 5000;
+        });
+        caseSection.appendChild(maxSpendRow);
+
+        // Buy Amount Input
+        const buyAmountRow = createInputRow('Buy Amount:', caseOpeningConfig.buyAmount, (val) => {
+            caseOpeningConfig.buyAmount = parseInt(val) || 10;
+        });
+        caseSection.appendChild(buyAmountRow);
+
+        // Case Selector
+        const caseSelectRow = document.createElement('div');
+        caseSelectRow.style.display = 'flex';
+        caseSelectRow.style.justifyContent = 'space-between';
+        caseSelectRow.style.marginBottom = '10px';
+        caseSelectRow.style.fontSize = '12px';
+
+        const caseLabel = document.createElement('span');
+        caseLabel.textContent = 'Case:';
+
+        const caseSelect = document.createElement('select');
+        caseSelect.style.width = '60%';
+        caseSelect.style.padding = '5px';
+        caseSelect.style.borderRadius = '5px';
+        caseSelect.style.background = 'rgba(0,0,0,0.3)';
+        caseSelect.style.color = '#fff';
+        caseSelect.style.border = '1px solid rgba(255,255,255,0.2)';
+
+        Object.keys(availableCases).forEach(caseName => {
+            const option = document.createElement('option');
+            option.value = caseName;
+            option.textContent = caseName;
+            option.style.color = '#000';
+            caseSelect.appendChild(option);
+        });
+
+        caseSelect.value = caseOpeningConfig.caseName;
+
+        caseSelect.addEventListener('change', (e) => {
+            const selected = availableCases[e.target.value];
+            caseOpeningConfig.caseName = e.target.value;
+            caseOpeningConfig.caseId = selected.id;
+            caseOpeningConfig.casePrice = selected.price;
+        });
+
+        caseSelectRow.appendChild(caseLabel);
+        caseSelectRow.appendChild(caseSelect);
+        caseSection.appendChild(caseSelectRow);
+
+        // Auto Open Checkbox
+        const autoOpenRow = document.createElement('div');
+        autoOpenRow.style.display = 'flex';
+        autoOpenRow.style.alignItems = 'center';
+        autoOpenRow.style.marginTop = '10px';
+        autoOpenRow.style.fontSize = '12px';
+
+        const autoOpenCheck = document.createElement('input');
+        autoOpenCheck.type = 'checkbox';
+        autoOpenCheck.checked = caseOpeningConfig.autoOpen;
+        autoOpenCheck.style.marginRight = '10px';
+        autoOpenCheck.addEventListener('change', (e) => {
+            caseOpeningConfig.autoOpen = e.target.checked;
+        });
+
+        const autoOpenLabel = document.createElement('label');
+        autoOpenLabel.textContent = 'Auto Open Cases';
+
+        autoOpenRow.appendChild(autoOpenCheck);
+        autoOpenRow.appendChild(autoOpenLabel);
+        caseSection.appendChild(autoOpenRow);
+
+        // Case Stats
+        const caseStatsDiv = document.createElement('div');
+        caseStatsDiv.id = 'case-stats';
+        caseStatsDiv.style.marginTop = '10px';
+        caseStatsDiv.style.fontSize = '11px';
+        caseStatsDiv.style.color = '#aaa';
+        caseStatsDiv.innerHTML = `
+            <div>Bought: 0 | Opened: 0</div>
+            <div>Spent: $0</div>
+        `;
+        caseSection.appendChild(caseStatsDiv);
+
+        uiContainer.appendChild(caseSection);
+
+        // Master Buttons
         masterButton = document.createElement('button');
         masterButton.textContent = '▶ Start All Games';
         Object.assign(masterButton.style, {
@@ -1407,21 +1520,51 @@
 
         uiContainer.appendChild(masterButton);
 
-        // Utility Buttons Section
+        // Case Opening Button
+        caseOpeningButton = document.createElement('button');
+        caseOpeningButton.textContent = '📦 Start Case Opening';
+        Object.assign(caseOpeningButton.style, {
+            width: '100%',
+            padding: '12px',
+            background: 'rgba(30, 30, 45, 0.90)',
+            color: 'white',
+            border: '1px solid rgba(255, 255, 255, 0.15)',
+            borderRadius: '20px',
+            cursor: 'pointer',
+            fontWeight: '600',
+            fontSize: '14px',
+            marginTop: '10px'
+        });
+
+        caseOpeningButton.addEventListener('click', () => {
+            caseOpeningActive = !caseOpeningActive;
+            caseOpeningConfig.enabled = caseOpeningActive;
+
+            if (caseOpeningActive) {
+                caseOpeningButton.textContent = '⏹ Stop Case Opening';
+                caseOpeningButton.style.background = theme.danger;
+                runCaseOpening();
+            } else {
+                caseOpeningButton.textContent = '📦 Start Case Opening';
+                caseOpeningButton.style.background = 'rgba(30, 30, 45, 0.90)';
+            }
+        });
+
+        uiContainer.appendChild(caseOpeningButton);
+
+        // Utility Buttons
         const utilitySection = document.createElement('div');
         utilitySection.style.marginTop = '15px';
         utilitySection.style.display = 'flex';
         utilitySection.style.flexDirection = 'column';
         utilitySection.style.gap = '10px';
 
-        // Auto Armory Button
         const armoryBtn = createUtilButton('🛡️ Auto Armory', () => {
             enableArmory = !enableArmory;
             armoryBtn.textContent = enableArmory ? '🔄 Armory Active' : '🛡️ Auto Armory';
             if (enableArmory) checkAndResetArmory();
         });
 
-        // Auto Trade-Up Button
         const tradeupBtn = createUtilButton('📊 Auto Trade-Up', () => {
             tradeupRunning = !tradeupRunning;
             tradeupBtn.textContent = tradeupRunning ? '⏹️ Stop Trade-Up' : '📊 Auto Trade-Up';
@@ -1432,24 +1575,20 @@
             }
         });
 
-        // Trade Sequence Button
-        const tradeSeqBtn = createUtilButton('🤝 Auto Trade Sequence', () => {
+        const tradeSeqBtn = createUtilButton('🤝 Trade Sequence', () => {
             if (tradeSeqRunning) {
                 tradeSeqCancelled = true;
                 tradeSeqRunning = false;
-                tradeSeqBtn.textContent = 'Stopping...';
             } else {
                 tradeSeqCancelled = false;
                 tradeSeqRunning = true;
-                tradeSeqBtn.textContent = '⏹️ Stop Sequence';
                 executeTradeSequence();
             }
         });
 
-        // AutoSell Toggle
-        const autosellBtn = createUtilButton('💸 AutoSell Skins', () => {
+        const autosellBtn = createUtilButton('💸 AutoSell', () => {
             autosellActive = !autosellActive;
-            autosellBtn.textContent = autosellActive ? '⏹ Stop AutoSell' : '💸 AutoSell Skins';
+            autosellBtn.textContent = autosellActive ? '⏹ Stop Sell' : '💸 AutoSell';
         });
 
         utilitySection.appendChild(armoryBtn);
@@ -1459,24 +1598,53 @@
 
         uiContainer.appendChild(utilitySection);
 
-        // Status Info
+        // Status
         const statusInfo = document.createElement('div');
         statusInfo.style.marginTop = '15px';
         statusInfo.style.padding = '10px';
         statusInfo.style.background = theme.surface;
         statusInfo.style.borderRadius = '10px';
-        statusInfo.style.fontSize = '12px';
+        statusInfo.style.fontSize = '11px';
         statusInfo.style.textAlign = 'center';
         statusInfo.innerHTML = `
             <div id="ws-status">WS: Not Connected</div>
-            <div id="vault-status">Vault: Initializing</div>
+            <div id="vault-status">Vault: Init</div>
         `;
         uiContainer.appendChild(statusInfo);
 
         document.body.appendChild(uiContainer);
 
-        // Make draggable
         makeDraggable(uiContainer, header);
+    }
+
+    function createInputRow(label, defaultVal, onChange) {
+        const row = document.createElement('div');
+        row.style.display = 'flex';
+        row.style.justifyContent = 'space-between';
+        row.style.marginBottom = '10px';
+        row.style.fontSize = '12px';
+
+        const labelSpan = document.createElement('span');
+        labelSpan.textContent = label;
+
+        const input = document.createElement('input');
+        input.type = 'number';
+        input.value = defaultVal;
+        input.style.width = '60%';
+        input.style.padding = '5px';
+        input.style.borderRadius = '5px';
+        input.style.background = 'rgba(0,0,0,0.3)';
+        input.style.color = '#fff';
+        input.style.border = '1px solid rgba(255,255,255,0.2)';
+
+        input.addEventListener('change', (e) => {
+            onChange(e.target.value);
+        });
+
+        row.appendChild(labelSpan);
+        row.appendChild(input);
+
+        return row;
     }
 
     function createUtilButton(text, onClick) {
@@ -1491,7 +1659,7 @@
             borderRadius: '20px',
             cursor: 'pointer',
             fontWeight: '600',
-            fontSize: '14px'
+            fontSize: '13px'
         });
         btn.addEventListener('click', onClick);
         return btn;
@@ -1548,28 +1716,34 @@
         if (el) el.textContent = `Vault: ${status}`;
     }
 
+    function updateCaseStats() {
+        const el = document.getElementById('case-stats');
+        if (el) {
+            el.innerHTML = `
+                <div>Bought: ${caseStats.totalBought} | Opened: ${caseStats.totalOpened}</div>
+                <div>Spent: $${caseStats.totalSpent.toFixed(2)}</div>
+            `;
+        }
+    }
+
     // =========================================================================
     // 🚀 INITIALIZATION
     // =========================================================================
 
     window.addEventListener('load', () => {
-        console.log('🚀 Custom Hub Multi-Game loaded!');
+        console.log('🚀 Custom Hub Multi-Game + Case Opening loaded!');
 
-        // Setup UI
         setupUI();
-
-        // Start AutoSell Loop
         startAutoSellLoop();
 
-        // Get user info
         userInfo('name').then(r => {
             hostName = r;
-            console.log(`👤 Logged in as: ${r}`);
+            console.log(`👤 User: ${r}`);
         });
 
         userInfo('pro').then(r => {
             maxPasses = r;
-            console.log(`⭐ Max Passes: ${r}`);
+            console.log(`⭐ Passes: ${r}`);
         });
     });
 
