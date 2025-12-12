@@ -14,12 +14,58 @@
 
     // ==================== CONFIGURATION ====================
     const CONFIG = {
-        VERSION: '1.0.0',
+        VERSION: '1.1.0',
         STORAGE_KEY: 'caseClickerAssistant',
         API_BASE: 'https://case-clicker.com/api',
         SELL_BATCH_SIZE: 50,
         LOOP_DELAY: 500,
     };
+
+    // ==================== CASE LIST ====================
+    const CASE_LIST = [
+        { id: "640c9ae8630b848c02320a64", name: "Revolution Case", price: 3.3 },
+        { id: "67fa1c883c3c4784cd62bba3", name: "Fever Case", price: 4.4 },
+        { id: "661eb20e5ee63458cc6c1abb", name: "Kilowatt Case", price: 3.2 },
+        { id: "635c2699877db3111241a1de", name: "Recoil Case", price: 3.2 },
+        { id: "63611055b58b01f6e36a5d01", name: "Snakebite Case", price: 3.7 },
+        { id: "63529100e4821cab2f1c5ed2", name: "Dreams And Nightmares Case", price: 3.8 },
+        { id: "63611c05b58b01f6e36a6de0", name: "Fracture Case", price: 3.5 },
+        { id: "637f8cc7ba2b763b85db1204", name: "Clutch Case", price: 4.3 },
+        { id: "637d04bea1b5a0576749198f", name: "CS20 Case", price: 4.5 },
+        { id: "637d061ea1b5a05767491991", name: "Prisma Case", price: 4.6 },
+        { id: "637d0222a1b5a0576749198b", name: "Prisma 2 Case", price: 4.6 },
+        { id: "63a35e08f235c457e282660e", name: "Falchion Case", price: 4.7 },
+        { id: "637f95e3ba2b763b85db12b4", name: "Danger Zone Case", price: 4.9 },
+        { id: "644ebd65c5cb63198345cab3", name: "Shadow Case", price: 5.1 },
+        { id: "63a5d9b2eb39fbb4dfdf8fff", name: "Horizon Case", price: 5.2 },
+        { id: "67056f1d2b333be2d8845d5a", name: "Gallery Case", price: 5.4 },
+        { id: "644ec1cec5cb63198345cadf", name: "Spectrum 2 Case", price: 7.0 },
+        { id: "63a35fa9f235c457e2826610", name: "Gamma Case", price: 7.2 },
+        { id: "63a5e062eb39fbb4dfdf9009", name: "Operation Wildfire Case", price: 7.2 },
+        { id: "63a36140f235c457e2826612", name: "Gamma 2 Case", price: 7.6 },
+        { id: "637d0c5ea1b5a057674923fe", name: "Chroma 2 Case", price: 7.6 },
+        { id: "637d0e3fa1b5a05767492400", name: "Chroma 3 Case", price: 7.7 },
+        { id: "644ebc22c5cb63198345ca87", name: "Revolver Case", price: 7.8 },
+        { id: "644ec087c5cb63198345cadd", name: "Spectrum Case", price: 8.1 },
+        { id: "63a5df80eb39fbb4dfdf9007", name: "Operation Vanguard Weapon Case", price: 8.3 },
+        { id: "635346787db930593e69cd6d", name: "Operation Phoenix Weapon Case", price: 8.4 },
+        { id: "637d0946a1b5a05767491993", name: "Chroma Case", price: 9.3 },
+        { id: "637d03b3a1b5a0576749198d", name: "Shattered Web Case", price: 10.7 },
+        { id: "644ec3bac5cb63198345cae6", name: "Winter Offensive Weapon Case", price: 11.8 },
+        { id: "63a5dbc9eb39fbb4dfdf9003", name: "Operation Breakout Weapon Case", price: 13.8 },
+        { id: "637f9444ba2b763b85db1298", name: "CS:GO Weapon Case 3", price: 14.3 },
+        { id: "636113ccb58b01f6e36a6047", name: "Operation Broken Fang Case", price: 14.2 },
+        { id: "63a5da99eb39fbb4dfdf9001", name: "Huntsman Weapon Case", price: 17.2 },
+        { id: "637f91f3ba2b763b85db1266", name: "CS:GO Weapon Case 2", price: 18.8 },
+        { id: "635c11428f2e0b1e1a4dd077", name: "Operation Riptide Case", price: 18.9 },
+        { id: "63a5d82feb39fbb4dfdf8ffd", name: "Glove Case", price: 19.5 },
+        { id: "63a5d67deb39fbb4dfdf8ffb", name: "eSports 2014 Summer Case", price: 25.8 },
+        { id: "63a5d45beb39fbb4dfdf8ff9", name: "eSports 2013 Winter Case", price: 23.6 },
+        { id: "63a5dd0eeb39fbb4dfdf9005", name: "Operation Hydra Case", price: 49.5 },
+        { id: "637542e91687bf4cebd95e5b", name: "Operation Bravo Case", price: 65 },
+        { id: "63a35c7ff235c457e28265ce", name: "eSports 2013 Case", price: 94.7 },
+        { id: "637f8f98ba2b763b85db1227", name: "CS:GO Weapon Case", price: 128.7 },
+    ].sort((a, b) => a.price - b.price);
 
     // ==================== STATE ====================
     const state = {
@@ -32,6 +78,7 @@
             sellThreshold: 1.00,
             sellMode: 'cash', // 'cash' | 'tokens'
             maxBulkOpen: 10,
+            selectedCaseId: CASE_LIST[0].id, // Default to cheapest case
         },
         stats: {
             casesBought: 0,
@@ -40,7 +87,6 @@
             moneyEarned: 0,
         },
         logs: [],
-        failedSellRuns: 0,
         isOpening: false,
     };
 
@@ -266,65 +312,48 @@
     // ==================== MAIN SCRIPTS ====================
     async function runBuyOpenScript() {
         if (state.activeScript !== 'buy-open') return;
-        if (isInventoryPage()) {
-            log('On inventory page - stopping', 'warning');
+
+        // Get selected case from dropdown
+        const selectedCase = CASE_LIST.find(c => c.id === state.settings.selectedCaseId);
+        if (!selectedCase) {
+            log('No case selected', 'error');
             stopAllScripts();
             return;
         }
 
-        const caseInfo = scrapeCurrentCaseInfo();
-        if (!caseInfo) {
-            log('Not on a case page', 'error');
-            stopAllScripts();
-            return;
-        }
-
-        log(`Starting Buy/Open for: ${caseInfo.name}`);
-        updateStatus('buy-open', `Working on ${caseInfo.name}`);
-
-        // We need the case ID - try to get it
-        let caseId = getCaseIdFromPage();
-        if (!caseId) {
-            log('Case ID not found, trying to fetch...', 'warning');
-            updateStatus('buy-open', 'Fetching case ID...');
-            caseId = await fetchCaseIdByName(caseInfo.name);
-        }
-        if (!caseId) {
-            log('Could not find case ID - try refreshing the page', 'error');
-            stopAllScripts();
-            return;
-        }
-        log(`Case ID: ${caseId}`, 'success');
-
-        state.selectedCase = { ...caseInfo, id: caseId };
+        const caseId = selectedCase.id;
+        log(`Starting Buy/Open for: ${selectedCase.name}`);
+        updateStatus('buy-open', `Working on ${selectedCase.name}`);
 
         while (state.activeScript === 'buy-open') {
             try {
-                // Get current user stats
+                // Get current user stats to know max bulk open and owned cases
                 const userStats = await getUserStats();
                 const maxBulk = userStats.caseOpenCount || 10;
                 state.settings.maxBulkOpen = maxBulk;
 
-                // Refresh case info
-                const currentInfo = scrapeCurrentCaseInfo();
-                const ownedCases = currentInfo?.owned || 0;
+                // Get owned cases from user's case inventory
+                const caseInventory = await apiRequest('/cases/me');
+                const ownedCaseData = caseInventory.find(c => c._id === caseId);
+                const ownedCases = ownedCaseData?.amount || 0;
+
+                log(`Owned: ${ownedCases} | Max bulk: ${maxBulk}`);
 
                 // Buy cases if needed
                 if (ownedCases < maxBulk && state.settings.buyAmount > 0) {
-                    const toBuy = Math.min(state.settings.buyAmount, maxBulk - ownedCases);
-                    if (toBuy > 0) {
-                        log(`Buying ${toBuy} cases...`);
-                        updateStatus('buy-open', `Buying ${toBuy} cases...`);
-                        await buyCases(caseId, toBuy);
-                        state.stats.casesBought += toBuy;
-                        log(`Bought ${toBuy} cases`, 'success');
-                        await sleep(300);
-                    }
+                    const toBuy = state.settings.buyAmount;
+                    log(`Buying ${toBuy} cases...`);
+                    updateStatus('buy-open', `Buying ${toBuy} cases...`);
+                    await buyCases(caseId, toBuy);
+                    state.stats.casesBought += toBuy;
+                    log(`Bought ${toBuy} cases`, 'success');
+                    await sleep(300);
                 }
 
-                // Refresh owned count
-                const updatedInfo = scrapeCurrentCaseInfo();
-                const casesToOpen = updatedInfo?.owned || 0;
+                // Re-fetch owned count after buying
+                const updatedInventory = await apiRequest('/cases/me');
+                const updatedCaseData = updatedInventory.find(c => c._id === caseId);
+                const casesToOpen = updatedCaseData?.amount || 0;
 
                 if (casesToOpen > 0) {
                     const openCount = Math.min(casesToOpen, maxBulk);
@@ -337,15 +366,15 @@
 
                     if (result && result.skins) {
                         const totalValue = result.skins.reduce((sum, s) => sum + (s.price || 0), 0);
-                        log(`Opened ${openCount} cases - Value: $${totalValue.toFixed(2)}`, 'success');
+                        log(`Opened ${openCount} - Value: $${totalValue.toFixed(2)}`, 'success');
                     }
 
                     state.isOpening = false;
                     await sleep(CONFIG.LOOP_DELAY);
                 } else {
-                    log('No cases to open - waiting...');
-                    updateStatus('buy-open', 'Waiting for cases...');
-                    await sleep(1000);
+                    log('No cases to open - buying more...');
+                    updateStatus('buy-open', 'Buying cases...');
+                    await sleep(500);
                 }
 
                 updateStatsPanel();
@@ -360,52 +389,50 @@
 
     async function runSellScript() {
         if (state.activeScript !== 'sell') return;
-        if (isInventoryPage()) {
-            log('On inventory page - stopping sell script', 'warning');
-            stopAllScripts();
-            return;
-        }
 
         log(`Starting Auto Sell (threshold: $${state.settings.sellThreshold}, mode: ${state.settings.sellMode})`);
-        state.failedSellRuns = 0;
+        let emptyRuns = 0;
 
         while (state.activeScript === 'sell') {
             try {
-                // Check if we should only sell when opening
-                if (!state.isOpening) {
-                    state.failedSellRuns++;
-                    if (state.failedSellRuns >= 2) {
-                        log('No active opening - stopping after 2 idle runs', 'warning');
+                updateStatus('sell', 'Fetching inventory...');
+
+                // Get all pages of inventory to find all sellable skins
+                let allSkinsToSell = [];
+                let page = 1;
+                let totalPages = 1;
+
+                do {
+                    const inventory = await getInventory(page);
+                    totalPages = inventory.pages || 1;
+
+                    const sellable = inventory.skins.filter(skin =>
+                        skin.price <= state.settings.sellThreshold
+                    );
+                    allSkinsToSell = allSkinsToSell.concat(sellable);
+                    page++;
+                } while (page <= totalPages && allSkinsToSell.length < CONFIG.SELL_BATCH_SIZE);
+
+                if (allSkinsToSell.length === 0) {
+                    emptyRuns++;
+                    if (emptyRuns >= 3) {
+                        log('No more skins to sell - stopping', 'success');
                         stopScript('sell');
                         return;
                     }
-                    log(`Waiting for case opening... (idle run ${state.failedSellRuns}/2)`);
-                    updateStatus('sell', 'Waiting for opening...');
+                    log(`No skins below threshold (check ${emptyRuns}/3)`);
+                    updateStatus('sell', 'Waiting for new skins...');
                     await sleep(2000);
                     continue;
                 }
 
-                state.failedSellRuns = 0;
-                updateStatus('sell', 'Fetching inventory...');
-
-                // Get inventory
-                const inventory = await getInventory(1);
-                const skinsToSell = inventory.skins.filter(skin =>
-                    skin.price <= state.settings.sellThreshold
-                );
-
-                if (skinsToSell.length === 0) {
-                    log('No skins below threshold');
-                    await sleep(1000);
-                    continue;
-                }
-
-                log(`Found ${skinsToSell.length} skins to sell`);
-                updateStatus('sell', `Selling ${skinsToSell.length} skins...`);
+                emptyRuns = 0;
+                log(`Found ${allSkinsToSell.length} skins to sell`);
+                updateStatus('sell', `Selling ${allSkinsToSell.length} skins...`);
 
                 const sellFn = state.settings.sellMode === 'tokens' ? sellSkinTokens : sellSkinCash;
 
-                for (const skin of skinsToSell.slice(0, CONFIG.SELL_BATCH_SIZE)) {
+                for (const skin of allSkinsToSell.slice(0, CONFIG.SELL_BATCH_SIZE)) {
                     if (state.activeScript !== 'sell') break;
 
                     try {
@@ -416,7 +443,7 @@
                     } catch (e) {
                         log(`Failed to sell ${skin.name}: ${e.message}`, 'error');
                     }
-                    await sleep(100);
+                    await sleep(50);
                 }
 
                 updateStatsPanel();
@@ -431,11 +458,6 @@
 
     // ==================== SCRIPT CONTROL ====================
     function startScript(scriptName) {
-        if (isInventoryPage()) {
-            log('Cannot start scripts on inventory page', 'warning');
-            return;
-        }
-
         state.activeScript = scriptName;
         log(`Started: ${scriptName}`);
         updateUI();
@@ -657,8 +679,8 @@
                                 <span id="cca-current-action" class="cca-status-value">Idle</span>
                             </div>
                             <div class="cca-status-item">
-                                <span class="cca-status-label">Case ID:</span>
-                                <span id="cca-case-id" class="cca-status-value" style="font-size: 10px;">${state.currentCaseId || 'Not detected'}</span>
+                                <span class="cca-status-label">Selected Case:</span>
+                                <span id="cca-selected-case" class="cca-status-value" style="font-size: 10px;">${CASE_LIST.find(c => c.id === state.settings.selectedCaseId)?.name || 'None'}</span>
                             </div>
                         </div>
                     </div>
@@ -666,6 +688,14 @@
                     <!-- Buy/Open Section -->
                     <div class="cca-section">
                         <div class="cca-section-title">Buy & Open Cases</div>
+                        <div class="cca-row">
+                            <label>Select Case:</label>
+                        </div>
+                        <div class="cca-row">
+                            <select id="cca-case-select" class="cca-select" style="width: 100%;">
+                                ${CASE_LIST.map(c => `<option value="${c.id}" ${state.settings.selectedCaseId === c.id ? 'selected' : ''}>${c.name} ($${c.price})</option>`).join('')}
+                            </select>
+                        </div>
                         <div class="cca-row">
                             <label>Buy Amount:</label>
                             <input type="number" id="cca-buy-amount" class="cca-input" value="${state.settings.buyAmount}" min="1" max="100">
@@ -747,6 +777,16 @@
             state.isMinimized = !state.isMinimized;
             document.getElementById('cca-body').style.display = state.isMinimized ? 'none' : 'block';
             document.getElementById('cca-minimize').textContent = state.isMinimized ? '+' : '−';
+            saveSettings();
+        });
+
+        // Case select dropdown
+        document.getElementById('cca-case-select').addEventListener('change', (e) => {
+            state.settings.selectedCaseId = e.target.value;
+            const selectedCase = CASE_LIST.find(c => c.id === e.target.value);
+            if (selectedCase) {
+                log(`Selected: ${selectedCase.name}`, 'info');
+            }
             saveSettings();
         });
 
@@ -843,12 +883,6 @@
             activeScriptEl.textContent = 'None';
             activeScriptEl.className = 'cca-status-value cca-status-inactive';
         }
-
-        // Disable on inventory page
-        if (isInventoryPage()) {
-            buyOpenBtn.disabled = true;
-            sellBtn.disabled = true;
-        }
     }
 
     function updateStatus(script, message) {
@@ -862,14 +896,17 @@
         const sold = document.getElementById('cca-stat-sold');
         const money = document.getElementById('cca-stat-money');
         const maxBulk = document.getElementById('cca-max-bulk');
-        const caseIdEl = document.getElementById('cca-case-id');
+        const selectedCaseEl = document.getElementById('cca-selected-case');
 
         if (bought) bought.textContent = state.stats.casesBought;
         if (opened) opened.textContent = state.stats.casesOpened;
         if (sold) sold.textContent = state.stats.skinsSold;
         if (money) money.textContent = `$${state.stats.moneyEarned.toFixed(2)}`;
         if (maxBulk) maxBulk.textContent = state.settings.maxBulkOpen;
-        if (caseIdEl) caseIdEl.textContent = state.currentCaseId || 'Not detected';
+        if (selectedCaseEl) {
+            const selectedCase = CASE_LIST.find(c => c.id === state.settings.selectedCaseId);
+            selectedCaseEl.textContent = selectedCase?.name || 'None';
+        }
     }
 
     function updateLogPanel() {
@@ -888,27 +925,7 @@
     function init() {
         loadSettings();
         createUI();
-        log('Case Clicker Assistant loaded', 'success');
-
-        // Check if on inventory page
-        if (isInventoryPage()) {
-            log('On inventory page - scripts disabled', 'warning');
-        }
-
-        // Watch for URL changes (SPA navigation)
-        let lastUrl = location.href;
-        new MutationObserver(() => {
-            if (location.href !== lastUrl) {
-                lastUrl = location.href;
-                // Reset case ID when navigating to a different page
-                state.currentCaseId = null;
-                if (isInventoryPage() && state.activeScript) {
-                    stopAllScripts();
-                }
-                updateUI();
-                updateStatsPanel();
-            }
-        }).observe(document.body, { subtree: true, childList: true });
+        log('Case Clicker Assistant v' + CONFIG.VERSION + ' loaded', 'success');
 
         // Periodically update stats panel
         setInterval(() => {
