@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Case Clicker Assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.2.0
+// @version      2.3.0
 // @description  Auto buy, open, and sell cases on case-clicker.com
 // @author       You
 // @match        https://case-clicker.com/*
@@ -14,7 +14,7 @@
 
     // ==================== CONFIGURATION ====================
     const CONFIG = {
-        VERSION: '2.2.0',
+        VERSION: '2.3.0',
         STORAGE_KEY: 'caseClickerAssistant',
         API_BASE: 'https://case-clicker.com/api',
         LOOP_DELAY: 300,
@@ -279,6 +279,7 @@
 
                 // ===== STEP 2: OPEN ALL CASES UNTIL EMPTY =====
                 let openedThisRound = 0;
+                let openedSinceSell = 0;
 
                 while (state.isRunning && ownedAmount > 0) {
                     const toOpen = Math.min(ownedAmount, maxBulk);
@@ -295,6 +296,7 @@
                         }
 
                         openedThisRound += actualOpened;
+                        openedSinceSell += actualOpened;
                         ownedAmount -= actualOpened;
                         state.stats.casesOpened += actualOpened;
 
@@ -306,13 +308,21 @@
                         updateStatsPanel();
                         await sleep(CONFIG.LOOP_DELAY);
 
-                        // ===== STEP 3: SELL AFTER EACH BULK OPEN =====
-                        await performBulkSell();
+                        // ===== STEP 3: SELL EVERY 100 CASES OPENED =====
+                        if (openedSinceSell >= 100) {
+                            await performBulkSell();
+                            openedSinceSell = 0;
+                        }
 
                     } catch (openError) {
                         log(`Open failed: ${openError.message}`, 'warning');
                         break;
                     }
+                }
+
+                // Sell remaining after round ends
+                if (openedSinceSell > 0) {
+                    await performBulkSell();
                 }
 
                 // ===== STEP 4: BUY MORE CASES (if buyAmount > 0) =====
