@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Case Clicker Assistant
 // @namespace    http://tampermonkey.net/
-// @version      1.2.0
+// @version      2.0.0
 // @description  Auto buy, open, and sell cases on case-clicker.com
 // @author       You
 // @match        https://case-clicker.com/*
@@ -14,11 +14,11 @@
 
     // ==================== CONFIGURATION ====================
     const CONFIG = {
-        VERSION: '1.2.0',
+        VERSION: '2.0.0',
         STORAGE_KEY: 'caseClickerAssistant',
         API_BASE: 'https://case-clicker.com/api',
-        SELL_BATCH_SIZE: 50,
-        LOOP_DELAY: 500,
+        LOOP_DELAY: 300,
+        SELL_DELAY: 500,
     };
 
     // ==================== CASE LIST ====================
@@ -70,48 +70,21 @@
     // ==================== STATE ====================
     const state = {
         isMinimized: false,
-        activeScript: null, // 'buy-open' | 'sell' | null
-        selectedCase: null,
-        currentCaseId: null, // Captured from XHR
+        isRunning: false,
         settings: {
             buyAmount: 10,
             sellThreshold: 1.00,
             sellMode: 'cash', // 'cash' | 'tokens'
             maxBulkOpen: 10,
-            selectedCaseId: CASE_LIST[0].id, // Default to cheapest case
+            selectedCaseId: CASE_LIST[0].id,
+            autoSellEnabled: true,
         },
         stats: {
             casesBought: 0,
             casesOpened: 0,
-            skinsSold: 0,
-            moneyEarned: 0,
+            sellClicks: 0,
         },
         logs: [],
-        isOpening: false,
-    };
-
-    // ==================== XHR INTERCEPTOR ====================
-    // Intercept fetch to capture case ID from API responses
-    const originalFetch = window.fetch;
-    window.fetch = async function(...args) {
-        const response = await originalFetch.apply(this, args);
-        const url = args[0]?.toString() || args[0];
-
-        // Clone response to read it without consuming
-        try {
-            if (url.includes('/api/cases?id=') || url.includes('/cases?id=')) {
-                const cloned = response.clone();
-                const data = await cloned.json();
-                if (data && data._id) {
-                    state.currentCaseId = data._id;
-                    console.log('[CCA] Captured case ID:', data._id);
-                }
-            }
-        } catch (e) {
-            // Ignore parse errors
-        }
-
-        return response;
     };
 
     // ==================== UTILITIES ====================
@@ -169,10 +142,6 @@
         return apiRequest('/me');
     }
 
-    async function getInventory(page = 1) {
-        return apiRequest(`/inventory?page=${page}`);
-    }
-
     async function buyCases(caseId, amount) {
         return apiRequest('/cases', {
             method: 'POST',
@@ -197,307 +166,221 @@
         });
     }
 
-    async function sellSkinCash(skinId) {
-        return apiRequest('/inventory', {
-            method: 'DELETE',
-            body: JSON.stringify({ id: skinId }),
-        });
+    // ==================== DOM SELL FUNCTIONS ====================
+    function findSellInput() {
+        return document.querySelector('.mantine-NumberInput-input');
     }
 
-    async function sellSkinTokens(skinId) {
-        return apiRequest('/casino/skinToTokens', {
-            method: 'POST',
-            body: JSON.stringify({ id: skinId }),
-        });
-    }
-
-    // ==================== DOM SCRAPING ====================
-    function scrapeCaseList() {
-        const cases = [];
-        const caseElements = document.querySelectorAll('.mantine-Stack-root');
-
-        caseElements.forEach(el => {
-            // Try to find case name and link
-            const link = el.querySelector('a[href*="/cases/cases/"]');
-            if (link) {
-                const href = link.getAttribute('href');
-                const name = href.split('/cases/cases/')[1];
-                if (name) {
-                    cases.push({
-                        name: decodeURIComponent(name),
-                        url: href,
-                    });
-                }
+    function findSellButton(mode) {
+        const buttons = document.querySelectorAll('.mantine-Button-label');
+        for (const label of buttons) {
+            if (mode === 'cash' && label.textContent.trim().toLowerCase() === 'cash') {
+                return label.closest('button');
             }
-        });
-
-        return cases;
-    }
-
-    function scrapeCurrentCaseInfo() {
-        // Get case ID from URL or page
-        const url = window.location.href;
-        const match = url.match(/\/cases\/cases\/(.+)/);
-        if (!match) return null;
-
-        const caseName = decodeURIComponent(match[1]);
-
-        // Get owned count from indicator
-        const countEl = document.querySelector('.mantine-Indicator-indicator');
-        const ownedCount = countEl ? parseInt(countEl.textContent) || 0 : 0;
-
-        // Get bulk dropdown max value
-        const dropdown = document.querySelector('.mantine-Select-input');
-        let maxBulk = 10;
-        if (dropdown) {
-            // The dropdown value might show current selection
-            const val = parseInt(dropdown.value);
-            if (!isNaN(val)) maxBulk = val;
-        }
-
-        return {
-            name: caseName,
-            owned: ownedCount,
-            maxBulk: maxBulk,
-        };
-    }
-
-    function getCaseIdFromPage() {
-        // First, check if we captured it from XHR
-        if (state.currentCaseId) {
-            return state.currentCaseId;
-        }
-
-        // Look for case ID in network requests or page data
-        // This is typically found in the page's script data or URL patterns
-        const scripts = document.querySelectorAll('script');
-        for (const script of scripts) {
-            const content = script.textContent;
-            if (content && content.includes('"_id"')) {
-                const match = content.match(/"_id"\s*:\s*"([a-f0-9]{24})"/);
-                if (match) return match[1];
+            if (mode === 'tokens' && label.textContent.trim().toLowerCase() === 'tokens') {
+                return label.closest('button');
             }
-        }
-
-        // Fallback: check for data attributes
-        const caseContainer = document.querySelector('[data-case-id]');
-        if (caseContainer) {
-            return caseContainer.getAttribute('data-case-id');
-        }
-
-        return null;
-    }
-
-    // Function to fetch case ID directly from API using case name
-    async function fetchCaseIdByName(caseName) {
-        try {
-            // The site might have an endpoint to get case by name
-            const encodedName = encodeURIComponent(caseName);
-            const response = await fetch(`${CONFIG.API_BASE}/cases?id=${encodedName}`, {
-                credentials: 'include',
-            });
-            if (response.ok) {
-                const data = await response.json();
-                if (data && data._id) {
-                    state.currentCaseId = data._id;
-                    return data._id;
-                }
-            }
-        } catch (e) {
-            console.log('[CCA] Failed to fetch case ID by name:', e);
         }
         return null;
     }
 
-    // ==================== MAIN SCRIPTS ====================
-    async function runBuyOpenScript() {
-        if (state.activeScript !== 'buy-open') return;
+    function setSellInputValue(value) {
+        const input = findSellInput();
+        if (!input) {
+            log('Sell input not found', 'warning');
+            return false;
+        }
 
-        // Get selected case from dropdown
+        // Set value using native setter to trigger React state
+        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        nativeInputValueSetter.call(input, value.toString());
+
+        // Dispatch input event to trigger React onChange
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+
+        return true;
+    }
+
+    function clickSellButton(mode) {
+        const button = findSellButton(mode);
+        if (!button) {
+            log(`Sell button (${mode}) not found`, 'warning');
+            return false;
+        }
+
+        if (button.disabled) {
+            log(`Sell button (${mode}) is disabled - nothing to sell`, 'info');
+            return false;
+        }
+
+        button.click();
+        return true;
+    }
+
+    async function performBulkSell() {
+        if (!state.settings.autoSellEnabled) return true;
+
+        log(`Selling items below $${state.settings.sellThreshold}...`);
+        updateStatus(`Selling items below $${state.settings.sellThreshold}...`);
+
+        // Set the threshold value in the input
+        if (!setSellInputValue(state.settings.sellThreshold)) {
+            return true; // Continue even if input not found (might not be on inventory page)
+        }
+
+        await sleep(100);
+
+        // Click the sell button
+        const sold = clickSellButton(state.settings.sellMode);
+        if (sold) {
+            state.stats.sellClicks++;
+            log(`Bulk sell clicked (${state.settings.sellMode})`, 'success');
+            updateStatsPanel();
+            await sleep(CONFIG.SELL_DELAY);
+            return true;
+        } else {
+            // Button disabled or not found - might mean only favorites left
+            return false;
+        }
+    }
+
+    // ==================== MAIN SCRIPT ====================
+    async function runMainLoop() {
+        if (!state.isRunning) return;
+
         const selectedCase = CASE_LIST.find(c => c.id === state.settings.selectedCaseId);
         if (!selectedCase) {
             log('No case selected', 'error');
-            stopAllScripts();
+            stopScript();
             return;
         }
 
         const caseId = selectedCase.id;
-        log(`Starting Buy/Open for: ${selectedCase.name}`);
-        updateStatus('buy-open', `Working on ${selectedCase.name}`);
+        log(`Starting automation for: ${selectedCase.name}`);
 
-        // Get max bulk open from user stats once at start
+        // Get max bulk open from user stats
         try {
             const userStats = await getUserStats();
-            const maxBulk = userStats.caseOpenCount || 10;
-            state.settings.maxBulkOpen = maxBulk;
-            log(`Max bulk open: ${maxBulk}`);
+            state.settings.maxBulkOpen = userStats.caseOpenCount || 10;
+            log(`Your max bulk open: ${state.settings.maxBulkOpen}`);
+            updateStatsPanel();
         } catch (e) {
-            log('Could not fetch user stats, using default bulk: 10', 'warning');
+            log('Could not fetch user stats, using default: 10', 'warning');
         }
 
-        while (state.activeScript === 'buy-open') {
-            try {
-                const maxBulk = state.settings.maxBulkOpen;
+        const maxBulk = state.settings.maxBulkOpen;
+        let consecutiveOpenFails = 0;
 
-                // Step 1: Buy cases
-                if (state.settings.buyAmount > 0) {
-                    const toBuy = state.settings.buyAmount;
-                    log(`Buying ${toBuy} cases...`);
-                    updateStatus('buy-open', `Buying ${toBuy} cases...`);
+        while (state.isRunning) {
+            try {
+                // ===== STEP 1: BUY CASES =====
+                const toBuy = state.settings.buyAmount;
+                log(`Buying ${toBuy} cases...`);
+                updateStatus(`Buying ${toBuy} cases...`);
+
+                let buySuccess = false;
+                try {
+                    await buyCases(caseId, toBuy);
+                    state.stats.casesBought += toBuy;
+                    log(`Bought ${toBuy} cases`, 'success');
+                    buySuccess = true;
+                    consecutiveOpenFails = 0; // Reset fail counter on successful buy
+                } catch (buyError) {
+                    log(`Buy failed: ${buyError.message}`, 'error');
+                }
+
+                await sleep(CONFIG.LOOP_DELAY);
+
+                // ===== STEP 2: OPEN ALL CASES UNTIL EMPTY =====
+                let openedThisRound = 0;
+                let openFailCount = 0;
+
+                while (state.isRunning) {
+                    log(`Opening ${maxBulk} cases...`);
+                    updateStatus(`Opening cases... (${openedThisRound} opened this round)`);
 
                     try {
-                        await buyCases(caseId, toBuy);
-                        state.stats.casesBought += toBuy;
-                        log(`Bought ${toBuy} cases`, 'success');
-                    } catch (buyError) {
-                        log(`Buy failed: ${buyError.message}`, 'error');
-                        // Continue anyway, might have cases from before
+                        const result = await openCases(caseId, maxBulk);
+                        const actualOpened = result?.skins?.length || 0;
+
+                        if (actualOpened === 0) {
+                            log('No cases opened - out of cases', 'info');
+                            break; // Exit open loop, go buy more
+                        }
+
+                        openedThisRound += actualOpened;
+                        state.stats.casesOpened += actualOpened;
+                        openFailCount = 0;
+
+                        if (result?.skins) {
+                            const totalValue = result.skins.reduce((sum, s) => sum + (s.price || 0), 0);
+                            log(`Opened ${actualOpened} - Value: $${totalValue.toFixed(2)}`, 'success');
+                        }
+
+                        updateStatsPanel();
+                        await sleep(CONFIG.LOOP_DELAY);
+
+                        // ===== STEP 3: SELL AFTER EACH BULK OPEN =====
+                        const sellSuccess = await performBulkSell();
+                        if (!sellSuccess && state.settings.autoSellEnabled) {
+                            log('Sell failed - only favorites left? Stopping.', 'warning');
+                            stopScript();
+                            return;
+                        }
+
+                    } catch (openError) {
+                        openFailCount++;
+                        log(`Open failed: ${openError.message}`, 'warning');
+
+                        if (openFailCount >= 2) {
+                            log('Multiple open failures - out of cases', 'info');
+                            break; // Exit open loop, go buy more
+                        }
+
+                        await sleep(500);
                     }
-                    await sleep(300);
                 }
 
-                // Step 2: Try to open cases (use maxBulk amount)
-                log(`Opening ${maxBulk} cases...`);
-                updateStatus('buy-open', `Opening ${maxBulk} cases...`);
-                state.isOpening = true;
-
-                try {
-                    const result = await openCases(caseId, maxBulk);
-
-                    // Count actual opened from result
-                    const actualOpened = result?.skins?.length || maxBulk;
-                    state.stats.casesOpened += actualOpened;
-
-                    if (result && result.skins) {
-                        const totalValue = result.skins.reduce((sum, s) => sum + (s.price || 0), 0);
-                        log(`Opened ${actualOpened} - Value: $${totalValue.toFixed(2)}`, 'success');
-                    } else {
-                        log(`Opened ${actualOpened} cases`, 'success');
+                // ===== CHECK IF WE SHOULD STOP =====
+                if (openedThisRound === 0) {
+                    consecutiveOpenFails++;
+                    if (!buySuccess && consecutiveOpenFails >= 2) {
+                        log('No cases to open and buying failed - stopping', 'error');
+                        stopScript();
+                        return;
                     }
-                } catch (openError) {
-                    // If opening fails (e.g., not enough cases), just continue loop
-                    log(`Open failed: ${openError.message}`, 'warning');
                 }
 
-                state.isOpening = false;
-                updateStatsPanel();
+                // Small delay before next buy cycle
                 await sleep(CONFIG.LOOP_DELAY);
 
             } catch (error) {
                 log(`Error: ${error.message}`, 'error');
-                state.isOpening = false;
-                await sleep(1000);
-            }
-        }
-    }
-
-    async function runSellScript() {
-        if (state.activeScript !== 'sell') return;
-
-        log(`Starting Auto Sell (threshold: $${state.settings.sellThreshold}, mode: ${state.settings.sellMode})`);
-        let emptyRuns = 0;
-
-        while (state.activeScript === 'sell') {
-            try {
-                updateStatus('sell', 'Fetching inventory...');
-
-                // Get all pages of inventory to find all sellable skins
-                let allSkinsToSell = [];
-                let page = 1;
-                let totalPages = 1;
-
-                do {
-                    const inventory = await getInventory(page);
-                    totalPages = inventory.pages || 1;
-
-                    const sellable = inventory.skins.filter(skin =>
-                        skin.price <= state.settings.sellThreshold
-                    );
-                    allSkinsToSell = allSkinsToSell.concat(sellable);
-                    page++;
-                } while (page <= totalPages && allSkinsToSell.length < CONFIG.SELL_BATCH_SIZE);
-
-                if (allSkinsToSell.length === 0) {
-                    emptyRuns++;
-                    if (emptyRuns >= 3) {
-                        log('No more skins to sell - stopping', 'success');
-                        stopScript('sell');
-                        return;
-                    }
-                    log(`No skins below threshold (check ${emptyRuns}/3)`);
-                    updateStatus('sell', 'Waiting for new skins...');
-                    await sleep(2000);
-                    continue;
-                }
-
-                emptyRuns = 0;
-                log(`Found ${allSkinsToSell.length} skins to sell`);
-                updateStatus('sell', `Selling ${allSkinsToSell.length} skins...`);
-
-                const sellFn = state.settings.sellMode === 'tokens' ? sellSkinTokens : sellSkinCash;
-
-                for (const skin of allSkinsToSell.slice(0, CONFIG.SELL_BATCH_SIZE)) {
-                    if (state.activeScript !== 'sell') break;
-
-                    try {
-                        await sellFn(skin._id);
-                        state.stats.skinsSold++;
-                        state.stats.moneyEarned += skin.price;
-                        log(`Sold: ${skin.name} ($${skin.price.toFixed(2)})`, 'success');
-                    } catch (e) {
-                        log(`Failed to sell ${skin.name}: ${e.message}`, 'error');
-                    }
-                    await sleep(50);
-                }
-
-                updateStatsPanel();
-                await sleep(CONFIG.LOOP_DELAY);
-
-            } catch (error) {
-                log(`Sell error: ${error.message}`, 'error');
                 await sleep(1000);
             }
         }
     }
 
     // ==================== SCRIPT CONTROL ====================
-    function startScript(scriptName) {
-        state.activeScript = scriptName;
-        log(`Started: ${scriptName}`);
+    function startScript() {
+        state.isRunning = true;
+        log('Script started');
         updateUI();
-
-        if (scriptName === 'buy-open') {
-            runBuyOpenScript();
-        } else if (scriptName === 'sell') {
-            runSellScript();
-        }
+        runMainLoop();
     }
 
-    function stopScript(scriptName) {
-        if (state.activeScript === scriptName) {
-            state.activeScript = null;
-            state.isOpening = false;
-            log(`Stopped: ${scriptName}`);
-            updateUI();
-        }
-    }
-
-    function stopAllScripts() {
-        state.activeScript = null;
-        state.isOpening = false;
-        log('All scripts stopped');
+    function stopScript() {
+        state.isRunning = false;
+        log('Script stopped');
         updateUI();
-    }
-
-    function isInventoryPage() {
-        return window.location.pathname === '/inventory';
+        updateStatus('Idle');
     }
 
     // ==================== UI ====================
     let uiContainer = null;
 
     function createUI() {
-        // Remove existing UI
         const existing = document.getElementById('cca-container');
         if (existing) existing.remove();
 
@@ -601,15 +484,20 @@
                     font-size: 12px;
                     cursor: pointer;
                 }
+                .cca-checkbox {
+                    width: 18px;
+                    height: 18px;
+                    cursor: pointer;
+                }
                 .cca-btn {
-                    padding: 8px 16px;
+                    padding: 10px 16px;
                     border: none;
                     border-radius: 6px;
                     cursor: pointer;
-                    font-size: 12px;
+                    font-size: 13px;
                     font-weight: 600;
                     transition: all 0.2s;
-                    flex: 1;
+                    width: 100%;
                 }
                 .cca-btn-primary {
                     background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%);
@@ -621,11 +509,6 @@
                     color: #fff;
                 }
                 .cca-btn-danger:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(255, 71, 87, 0.3); }
-                .cca-btn:disabled {
-                    opacity: 0.5;
-                    cursor: not-allowed;
-                    transform: none !important;
-                }
                 .cca-status {
                     background: #0d1b2a;
                     border-radius: 6px;
@@ -651,10 +534,7 @@
                     font-family: 'Monaco', 'Consolas', monospace;
                     font-size: 11px;
                 }
-                .cca-log-entry {
-                    margin-bottom: 4px;
-                    line-height: 1.4;
-                }
+                .cca-log-entry { margin-bottom: 4px; line-height: 1.4; }
                 .cca-log-time { color: #666; }
                 .cca-log-info { color: #aaa; }
                 .cca-log-success { color: #2ed573; }
@@ -667,7 +547,7 @@
             <div id="cca-panel">
                 <div id="cca-header">
                     <h3>Case Clicker Assistant v${CONFIG.VERSION}</h3>
-                    <button id="cca-minimize">${state.isMinimized ? '+' : '−'}</button>
+                    <button id="cca-minimize">${state.isMinimized ? '+' : '-'}</button>
                 </div>
                 <div id="cca-body">
                     <!-- Status Section -->
@@ -675,26 +555,23 @@
                         <div class="cca-section-title">Status</div>
                         <div class="cca-status">
                             <div class="cca-status-item">
-                                <span class="cca-status-label">Active Script:</span>
-                                <span id="cca-active-script" class="cca-status-value cca-status-inactive">None</span>
+                                <span class="cca-status-label">Status:</span>
+                                <span id="cca-running-status" class="cca-status-value cca-status-inactive">Stopped</span>
                             </div>
                             <div class="cca-status-item">
                                 <span class="cca-status-label">Current Action:</span>
                                 <span id="cca-current-action" class="cca-status-value">Idle</span>
                             </div>
                             <div class="cca-status-item">
-                                <span class="cca-status-label">Selected Case:</span>
-                                <span id="cca-selected-case" class="cca-status-value" style="font-size: 10px;">${CASE_LIST.find(c => c.id === state.settings.selectedCaseId)?.name || 'None'}</span>
+                                <span class="cca-status-label">Max Bulk Open:</span>
+                                <span id="cca-max-bulk" class="cca-status-value">${state.settings.maxBulkOpen}</span>
                             </div>
                         </div>
                     </div>
 
-                    <!-- Buy/Open Section -->
+                    <!-- Case Selection -->
                     <div class="cca-section">
-                        <div class="cca-section-title">Buy & Open Cases</div>
-                        <div class="cca-row">
-                            <label>Select Case:</label>
-                        </div>
+                        <div class="cca-section-title">Case Selection</div>
                         <div class="cca-row">
                             <select id="cca-case-select" class="cca-select" style="width: 100%;">
                                 ${CASE_LIST.map(c => `<option value="${c.id}" ${state.settings.selectedCaseId === c.id ? 'selected' : ''}>${c.name} ($${c.price})</option>`).join('')}
@@ -702,20 +579,17 @@
                         </div>
                         <div class="cca-row">
                             <label>Buy Amount:</label>
-                            <input type="number" id="cca-buy-amount" class="cca-input" value="${state.settings.buyAmount}" min="1" max="100">
-                        </div>
-                        <div class="cca-row">
-                            <label>Max Bulk Open:</label>
-                            <span id="cca-max-bulk" style="color: #00d4ff;">${state.settings.maxBulkOpen}</span>
-                        </div>
-                        <div class="cca-row">
-                            <button id="cca-btn-buyopen" class="cca-btn cca-btn-primary">Start Buy/Open</button>
+                            <input type="number" id="cca-buy-amount" class="cca-input" value="${state.settings.buyAmount}" min="1" max="1000">
                         </div>
                     </div>
 
-                    <!-- Sell Section -->
+                    <!-- Auto Sell Settings -->
                     <div class="cca-section">
-                        <div class="cca-section-title">Auto Sell</div>
+                        <div class="cca-section-title">Auto Sell (after each bulk open)</div>
+                        <div class="cca-row">
+                            <label>Enable Auto Sell:</label>
+                            <input type="checkbox" id="cca-auto-sell" class="cca-checkbox" ${state.settings.autoSellEnabled ? 'checked' : ''}>
+                        </div>
                         <div class="cca-row">
                             <label>Sell Below $:</label>
                             <input type="number" id="cca-sell-threshold" class="cca-input" value="${state.settings.sellThreshold}" min="0" step="0.1">
@@ -726,9 +600,6 @@
                                 <option value="cash" ${state.settings.sellMode === 'cash' ? 'selected' : ''}>Cash</option>
                                 <option value="tokens" ${state.settings.sellMode === 'tokens' ? 'selected' : ''}>Tokens</option>
                             </select>
-                        </div>
-                        <div class="cca-row">
-                            <button id="cca-btn-sell" class="cca-btn cca-btn-primary">Start Auto Sell</button>
                         </div>
                     </div>
 
@@ -745,25 +616,21 @@
                                 <span id="cca-stat-opened" class="cca-status-value">${state.stats.casesOpened}</span>
                             </div>
                             <div class="cca-status-item">
-                                <span class="cca-status-label">Skins Sold:</span>
-                                <span id="cca-stat-sold" class="cca-status-value">${state.stats.skinsSold}</span>
-                            </div>
-                            <div class="cca-status-item">
-                                <span class="cca-status-label">Money Earned:</span>
-                                <span id="cca-stat-money" class="cca-status-value">$${state.stats.moneyEarned.toFixed(2)}</span>
+                                <span class="cca-status-label">Sell Clicks:</span>
+                                <span id="cca-stat-sells" class="cca-status-value">${state.stats.sellClicks}</span>
                             </div>
                         </div>
                     </div>
 
                     <!-- Log Section -->
                     <div class="cca-section">
-                        <div class="cca-section-title">Dev Log</div>
+                        <div class="cca-section-title">Log</div>
                         <div id="cca-log"></div>
                     </div>
 
-                    <!-- Stop All Button -->
+                    <!-- Control Button -->
                     <div class="cca-row">
-                        <button id="cca-btn-stop" class="cca-btn cca-btn-danger">Stop All Scripts</button>
+                        <button id="cca-btn-toggle" class="cca-btn cca-btn-primary">Start Script</button>
                     </div>
                 </div>
             </div>
@@ -776,68 +643,50 @@
     }
 
     function attachEventListeners() {
-        // Minimize toggle
         document.getElementById('cca-minimize').addEventListener('click', () => {
             state.isMinimized = !state.isMinimized;
             document.getElementById('cca-body').style.display = state.isMinimized ? 'none' : 'block';
-            document.getElementById('cca-minimize').textContent = state.isMinimized ? '+' : '−';
+            document.getElementById('cca-minimize').textContent = state.isMinimized ? '+' : '-';
             saveSettings();
         });
 
-        // Case select dropdown
         document.getElementById('cca-case-select').addEventListener('change', (e) => {
             state.settings.selectedCaseId = e.target.value;
             const selectedCase = CASE_LIST.find(c => c.id === e.target.value);
-            if (selectedCase) {
-                log(`Selected: ${selectedCase.name}`, 'info');
-            }
+            if (selectedCase) log(`Selected: ${selectedCase.name}`, 'info');
             saveSettings();
         });
 
-        // Buy amount input
         document.getElementById('cca-buy-amount').addEventListener('change', (e) => {
             state.settings.buyAmount = parseInt(e.target.value) || 10;
             saveSettings();
         });
 
-        // Sell threshold input
+        document.getElementById('cca-auto-sell').addEventListener('change', (e) => {
+            state.settings.autoSellEnabled = e.target.checked;
+            saveSettings();
+        });
+
         document.getElementById('cca-sell-threshold').addEventListener('change', (e) => {
             state.settings.sellThreshold = parseFloat(e.target.value) || 1.00;
             saveSettings();
         });
 
-        // Sell mode select
         document.getElementById('cca-sell-mode').addEventListener('change', (e) => {
             state.settings.sellMode = e.target.value;
             saveSettings();
         });
 
-        // Buy/Open button
-        document.getElementById('cca-btn-buyopen').addEventListener('click', () => {
-            if (state.activeScript === 'buy-open') {
-                stopScript('buy-open');
+        document.getElementById('cca-btn-toggle').addEventListener('click', () => {
+            if (state.isRunning) {
+                stopScript();
             } else {
-                startScript('buy-open');
+                startScript();
             }
-        });
-
-        // Sell button
-        document.getElementById('cca-btn-sell').addEventListener('click', () => {
-            if (state.activeScript === 'sell') {
-                stopScript('sell');
-            } else {
-                startScript('sell');
-            }
-        });
-
-        // Stop all button
-        document.getElementById('cca-btn-stop').addEventListener('click', () => {
-            stopAllScripts();
         });
     }
 
     function makeDraggable() {
-        const panel = document.getElementById('cca-panel');
         const header = document.getElementById('cca-header');
         let isDragging = false;
         let offsetX, offsetY;
@@ -861,35 +710,23 @@
     }
 
     function updateUI() {
-        const buyOpenBtn = document.getElementById('cca-btn-buyopen');
-        const sellBtn = document.getElementById('cca-btn-sell');
-        const activeScriptEl = document.getElementById('cca-active-script');
+        const toggleBtn = document.getElementById('cca-btn-toggle');
+        const statusEl = document.getElementById('cca-running-status');
 
-        if (state.activeScript === 'buy-open') {
-            buyOpenBtn.textContent = 'Stop Buy/Open';
-            buyOpenBtn.className = 'cca-btn cca-btn-danger';
-            sellBtn.disabled = true;
-            activeScriptEl.textContent = 'Buy/Open';
-            activeScriptEl.className = 'cca-status-value cca-status-active';
-        } else if (state.activeScript === 'sell') {
-            sellBtn.textContent = 'Stop Auto Sell';
-            sellBtn.className = 'cca-btn cca-btn-danger';
-            buyOpenBtn.disabled = true;
-            activeScriptEl.textContent = 'Auto Sell';
-            activeScriptEl.className = 'cca-status-value cca-status-active';
+        if (state.isRunning) {
+            toggleBtn.textContent = 'Stop Script';
+            toggleBtn.className = 'cca-btn cca-btn-danger';
+            statusEl.textContent = 'Running';
+            statusEl.className = 'cca-status-value cca-status-active';
         } else {
-            buyOpenBtn.textContent = 'Start Buy/Open';
-            buyOpenBtn.className = 'cca-btn cca-btn-primary';
-            buyOpenBtn.disabled = false;
-            sellBtn.textContent = 'Start Auto Sell';
-            sellBtn.className = 'cca-btn cca-btn-primary';
-            sellBtn.disabled = false;
-            activeScriptEl.textContent = 'None';
-            activeScriptEl.className = 'cca-status-value cca-status-inactive';
+            toggleBtn.textContent = 'Start Script';
+            toggleBtn.className = 'cca-btn cca-btn-primary';
+            statusEl.textContent = 'Stopped';
+            statusEl.className = 'cca-status-value cca-status-inactive';
         }
     }
 
-    function updateStatus(script, message) {
+    function updateStatus(message) {
         const el = document.getElementById('cca-current-action');
         if (el) el.textContent = message;
     }
@@ -897,20 +734,13 @@
     function updateStatsPanel() {
         const bought = document.getElementById('cca-stat-bought');
         const opened = document.getElementById('cca-stat-opened');
-        const sold = document.getElementById('cca-stat-sold');
-        const money = document.getElementById('cca-stat-money');
+        const sells = document.getElementById('cca-stat-sells');
         const maxBulk = document.getElementById('cca-max-bulk');
-        const selectedCaseEl = document.getElementById('cca-selected-case');
 
         if (bought) bought.textContent = state.stats.casesBought;
         if (opened) opened.textContent = state.stats.casesOpened;
-        if (sold) sold.textContent = state.stats.skinsSold;
-        if (money) money.textContent = `$${state.stats.moneyEarned.toFixed(2)}`;
+        if (sells) sells.textContent = state.stats.sellClicks;
         if (maxBulk) maxBulk.textContent = state.settings.maxBulkOpen;
-        if (selectedCaseEl) {
-            const selectedCase = CASE_LIST.find(c => c.id === state.settings.selectedCaseId);
-            selectedCaseEl.textContent = selectedCase?.name || 'None';
-        }
     }
 
     function updateLogPanel() {
@@ -930,14 +760,13 @@
         loadSettings();
         createUI();
         log('Case Clicker Assistant v' + CONFIG.VERSION + ' loaded', 'success');
+        log('Go to /inventory page for auto-sell to work', 'info');
 
-        // Periodically update stats panel
         setInterval(() => {
             updateStatsPanel();
         }, 1000);
     }
 
-    // Wait for page to be ready
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', init);
     } else {
