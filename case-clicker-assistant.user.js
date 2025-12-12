@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Case Clicker Assistant
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.2.0
 // @description  Auto buy, open, and sell cases on case-clicker.com
 // @author       You
 // @match        https://case-clicker.com/*
@@ -14,7 +14,7 @@
 
     // ==================== CONFIGURATION ====================
     const CONFIG = {
-        VERSION: '1.1.0',
+        VERSION: '1.2.0',
         STORAGE_KEY: 'caseClickerAssistant',
         API_BASE: 'https://case-clicker.com/api',
         SELL_BATCH_SIZE: 50,
@@ -325,59 +325,63 @@
         log(`Starting Buy/Open for: ${selectedCase.name}`);
         updateStatus('buy-open', `Working on ${selectedCase.name}`);
 
+        // Get max bulk open from user stats once at start
+        try {
+            const userStats = await getUserStats();
+            const maxBulk = userStats.caseOpenCount || 10;
+            state.settings.maxBulkOpen = maxBulk;
+            log(`Max bulk open: ${maxBulk}`);
+        } catch (e) {
+            log('Could not fetch user stats, using default bulk: 10', 'warning');
+        }
+
         while (state.activeScript === 'buy-open') {
             try {
-                // Get current user stats to know max bulk open and owned cases
-                const userStats = await getUserStats();
-                const maxBulk = userStats.caseOpenCount || 10;
-                state.settings.maxBulkOpen = maxBulk;
+                const maxBulk = state.settings.maxBulkOpen;
 
-                // Get owned cases from user's case inventory
-                const caseInventory = await apiRequest('/cases/me');
-                const ownedCaseData = caseInventory.find(c => c._id === caseId);
-                const ownedCases = ownedCaseData?.amount || 0;
-
-                log(`Owned: ${ownedCases} | Max bulk: ${maxBulk}`);
-
-                // Buy cases if needed
-                if (ownedCases < maxBulk && state.settings.buyAmount > 0) {
+                // Step 1: Buy cases
+                if (state.settings.buyAmount > 0) {
                     const toBuy = state.settings.buyAmount;
                     log(`Buying ${toBuy} cases...`);
                     updateStatus('buy-open', `Buying ${toBuy} cases...`);
-                    await buyCases(caseId, toBuy);
-                    state.stats.casesBought += toBuy;
-                    log(`Bought ${toBuy} cases`, 'success');
+
+                    try {
+                        await buyCases(caseId, toBuy);
+                        state.stats.casesBought += toBuy;
+                        log(`Bought ${toBuy} cases`, 'success');
+                    } catch (buyError) {
+                        log(`Buy failed: ${buyError.message}`, 'error');
+                        // Continue anyway, might have cases from before
+                    }
                     await sleep(300);
                 }
 
-                // Re-fetch owned count after buying
-                const updatedInventory = await apiRequest('/cases/me');
-                const updatedCaseData = updatedInventory.find(c => c._id === caseId);
-                const casesToOpen = updatedCaseData?.amount || 0;
+                // Step 2: Try to open cases (use maxBulk amount)
+                log(`Opening ${maxBulk} cases...`);
+                updateStatus('buy-open', `Opening ${maxBulk} cases...`);
+                state.isOpening = true;
 
-                if (casesToOpen > 0) {
-                    const openCount = Math.min(casesToOpen, maxBulk);
-                    log(`Opening ${openCount} cases...`);
-                    updateStatus('buy-open', `Opening ${openCount} cases...`);
-                    state.isOpening = true;
+                try {
+                    const result = await openCases(caseId, maxBulk);
 
-                    const result = await openCases(caseId, openCount);
-                    state.stats.casesOpened += openCount;
+                    // Count actual opened from result
+                    const actualOpened = result?.skins?.length || maxBulk;
+                    state.stats.casesOpened += actualOpened;
 
                     if (result && result.skins) {
                         const totalValue = result.skins.reduce((sum, s) => sum + (s.price || 0), 0);
-                        log(`Opened ${openCount} - Value: $${totalValue.toFixed(2)}`, 'success');
+                        log(`Opened ${actualOpened} - Value: $${totalValue.toFixed(2)}`, 'success');
+                    } else {
+                        log(`Opened ${actualOpened} cases`, 'success');
                     }
-
-                    state.isOpening = false;
-                    await sleep(CONFIG.LOOP_DELAY);
-                } else {
-                    log('No cases to open - buying more...');
-                    updateStatus('buy-open', 'Buying cases...');
-                    await sleep(500);
+                } catch (openError) {
+                    // If opening fails (e.g., not enough cases), just continue loop
+                    log(`Open failed: ${openError.message}`, 'warning');
                 }
 
+                state.isOpening = false;
                 updateStatsPanel();
+                await sleep(CONFIG.LOOP_DELAY);
 
             } catch (error) {
                 log(`Error: ${error.message}`, 'error');
