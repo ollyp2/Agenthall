@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Case Clicker Assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.0.0
+// @version      2.1.0
 // @description  Auto buy, open, and sell cases on case-clicker.com
 // @author       You
 // @match        https://case-clicker.com/*
@@ -14,11 +14,10 @@
 
     // ==================== CONFIGURATION ====================
     const CONFIG = {
-        VERSION: '2.0.0',
+        VERSION: '2.1.0',
         STORAGE_KEY: 'caseClickerAssistant',
         API_BASE: 'https://case-clicker.com/api',
         LOOP_DELAY: 300,
-        SELL_DELAY: 500,
     };
 
     // ==================== CASE LIST ====================
@@ -72,7 +71,7 @@
         isMinimized: false,
         isRunning: false,
         settings: {
-            buyAmount: 10,
+            buyAmount: 0, // 0 = only open, don't buy
             sellThreshold: 1.00,
             sellMode: 'cash', // 'cash' | 'tokens'
             maxBulkOpen: 10,
@@ -82,7 +81,8 @@
         stats: {
             casesBought: 0,
             casesOpened: 0,
-            sellClicks: 0,
+            skinsSold: 0,
+            moneyEarned: 0,
         },
         logs: [],
     };
@@ -166,82 +166,63 @@
         });
     }
 
-    // ==================== DOM SELL FUNCTIONS ====================
-    function findSellInput() {
-        return document.querySelector('.mantine-NumberInput-input');
+    // ==================== BULK SELL API ====================
+    // DELETE /api/inventory {"type":"price","value":X,"currency":"money"} = sell for cash
+    // PATCH /api/inventory {"type":"price","value":X,"currency":"money"} = sell for tokens
+    async function bulkSellForCash(threshold) {
+        return apiRequest('/inventory', {
+            method: 'DELETE',
+            body: JSON.stringify({
+                type: 'price',
+                value: threshold,
+                currency: 'money',
+            }),
+        });
     }
 
-    function findSellButton(mode) {
-        const buttons = document.querySelectorAll('.mantine-Button-label');
-        for (const label of buttons) {
-            if (mode === 'cash' && label.textContent.trim().toLowerCase() === 'cash') {
-                return label.closest('button');
-            }
-            if (mode === 'tokens' && label.textContent.trim().toLowerCase() === 'tokens') {
-                return label.closest('button');
-            }
-        }
-        return null;
-    }
-
-    function setSellInputValue(value) {
-        const input = findSellInput();
-        if (!input) {
-            log('Sell input not found', 'warning');
-            return false;
-        }
-
-        // Set value using native setter to trigger React state
-        const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        nativeInputValueSetter.call(input, value.toString());
-
-        // Dispatch input event to trigger React onChange
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-
-        return true;
-    }
-
-    function clickSellButton(mode) {
-        const button = findSellButton(mode);
-        if (!button) {
-            log(`Sell button (${mode}) not found`, 'warning');
-            return false;
-        }
-
-        if (button.disabled) {
-            log(`Sell button (${mode}) is disabled - nothing to sell`, 'info');
-            return false;
-        }
-
-        button.click();
-        return true;
+    async function bulkSellForTokens(threshold) {
+        return apiRequest('/inventory', {
+            method: 'PATCH',
+            body: JSON.stringify({
+                type: 'price',
+                value: threshold,
+                currency: 'money',
+            }),
+        });
     }
 
     async function performBulkSell() {
-        if (!state.settings.autoSellEnabled) return true;
+        if (!state.settings.autoSellEnabled) return { success: true, count: 0 };
 
-        log(`Selling items below $${state.settings.sellThreshold}...`);
-        updateStatus(`Selling items below $${state.settings.sellThreshold}...`);
+        const threshold = state.settings.sellThreshold;
+        log(`Selling items below $${threshold} for ${state.settings.sellMode}...`);
+        updateStatus(`Selling items below $${threshold}...`);
 
-        // Set the threshold value in the input
-        if (!setSellInputValue(state.settings.sellThreshold)) {
-            return true; // Continue even if input not found (might not be on inventory page)
-        }
+        try {
+            let result;
+            if (state.settings.sellMode === 'tokens') {
+                result = await bulkSellForTokens(threshold);
+            } else {
+                result = await bulkSellForCash(threshold);
+            }
 
-        await sleep(100);
+            // Response: {"cost":2210.92,"count":290}
+            const count = result?.count || 0;
+            const earned = result?.cost || 0;
 
-        // Click the sell button
-        const sold = clickSellButton(state.settings.sellMode);
-        if (sold) {
-            state.stats.sellClicks++;
-            log(`Bulk sell clicked (${state.settings.sellMode})`, 'success');
-            updateStatsPanel();
-            await sleep(CONFIG.SELL_DELAY);
-            return true;
-        } else {
-            // Button disabled or not found - might mean only favorites left
-            return false;
+            if (count > 0) {
+                state.stats.skinsSold += count;
+                state.stats.moneyEarned += earned;
+                log(`Sold ${count} items for $${earned.toFixed(2)}`, 'success');
+                updateStatsPanel();
+                return { success: true, count: count };
+            } else {
+                log('No items to sell (only favorites left?)', 'info');
+                return { success: true, count: 0 };
+            }
+        } catch (e) {
+            log(`Sell error: ${e.message}`, 'error');
+            return { success: false, count: 0 };
         }
     }
 
@@ -270,48 +251,29 @@
         }
 
         const maxBulk = state.settings.maxBulkOpen;
-        let consecutiveOpenFails = 0;
+        let consecutiveEmptyOpens = 0;
 
         while (state.isRunning) {
             try {
-                // ===== STEP 1: BUY CASES =====
-                const toBuy = state.settings.buyAmount;
-                log(`Buying ${toBuy} cases...`);
-                updateStatus(`Buying ${toBuy} cases...`);
-
-                let buySuccess = false;
-                try {
-                    await buyCases(caseId, toBuy);
-                    state.stats.casesBought += toBuy;
-                    log(`Bought ${toBuy} cases`, 'success');
-                    buySuccess = true;
-                    consecutiveOpenFails = 0; // Reset fail counter on successful buy
-                } catch (buyError) {
-                    log(`Buy failed: ${buyError.message}`, 'error');
-                }
-
-                await sleep(CONFIG.LOOP_DELAY);
-
-                // ===== STEP 2: OPEN ALL CASES UNTIL EMPTY =====
+                // ===== STEP 1: OPEN ALL CASES UNTIL EMPTY =====
                 let openedThisRound = 0;
-                let openFailCount = 0;
 
                 while (state.isRunning) {
                     log(`Opening ${maxBulk} cases...`);
-                    updateStatus(`Opening cases... (${openedThisRound} opened this round)`);
+                    updateStatus(`Opening cases... (${state.stats.casesOpened} total)`);
 
                     try {
                         const result = await openCases(caseId, maxBulk);
                         const actualOpened = result?.skins?.length || 0;
 
                         if (actualOpened === 0) {
-                            log('No cases opened - out of cases', 'info');
-                            break; // Exit open loop, go buy more
+                            log('No cases to open - out of cases', 'info');
+                            break; // Exit open loop
                         }
 
                         openedThisRound += actualOpened;
                         state.stats.casesOpened += actualOpened;
-                        openFailCount = 0;
+                        consecutiveEmptyOpens = 0;
 
                         if (result?.skins) {
                             const totalValue = result.skins.reduce((sum, s) => sum + (s.price || 0), 0);
@@ -321,38 +283,55 @@
                         updateStatsPanel();
                         await sleep(CONFIG.LOOP_DELAY);
 
-                        // ===== STEP 3: SELL AFTER EACH BULK OPEN =====
-                        const sellSuccess = await performBulkSell();
-                        if (!sellSuccess && state.settings.autoSellEnabled) {
-                            log('Sell failed - only favorites left? Stopping.', 'warning');
+                        // ===== STEP 2: SELL AFTER EACH BULK OPEN =====
+                        const sellResult = await performBulkSell();
+                        // Continue regardless of sell result
+
+                    } catch (openError) {
+                        log(`Open failed: ${openError.message}`, 'warning');
+                        break; // Exit open loop, try to buy more
+                    }
+                }
+
+                // ===== STEP 3: BUY MORE CASES (if buyAmount > 0) =====
+                if (state.settings.buyAmount > 0) {
+                    const toBuy = state.settings.buyAmount;
+                    log(`Buying ${toBuy} cases...`);
+                    updateStatus(`Buying ${toBuy} cases...`);
+
+                    try {
+                        await buyCases(caseId, toBuy);
+                        state.stats.casesBought += toBuy;
+                        log(`Bought ${toBuy} cases`, 'success');
+                        updateStatsPanel();
+                        consecutiveEmptyOpens = 0;
+                    } catch (buyError) {
+                        log(`Buy failed: ${buyError.message}`, 'error');
+                        // If we couldn't open AND couldn't buy, we should stop
+                        if (openedThisRound === 0) {
+                            consecutiveEmptyOpens++;
+                            if (consecutiveEmptyOpens >= 2) {
+                                log('No cases to open and buying failed - stopping', 'error');
+                                stopScript();
+                                return;
+                            }
+                        }
+                    }
+                } else {
+                    // buyAmount is 0, so we're in "open only" mode
+                    if (openedThisRound === 0) {
+                        consecutiveEmptyOpens++;
+                        if (consecutiveEmptyOpens >= 2) {
+                            log('No more cases to open - stopping (buy amount is 0)', 'info');
                             stopScript();
                             return;
                         }
-
-                    } catch (openError) {
-                        openFailCount++;
-                        log(`Open failed: ${openError.message}`, 'warning');
-
-                        if (openFailCount >= 2) {
-                            log('Multiple open failures - out of cases', 'info');
-                            break; // Exit open loop, go buy more
-                        }
-
-                        await sleep(500);
+                        // Wait a bit before retrying
+                        log('Waiting for more cases...', 'info');
+                        await sleep(2000);
                     }
                 }
 
-                // ===== CHECK IF WE SHOULD STOP =====
-                if (openedThisRound === 0) {
-                    consecutiveOpenFails++;
-                    if (!buySuccess && consecutiveOpenFails >= 2) {
-                        log('No cases to open and buying failed - stopping', 'error');
-                        stopScript();
-                        return;
-                    }
-                }
-
-                // Small delay before next buy cycle
                 await sleep(CONFIG.LOOP_DELAY);
 
             } catch (error) {
@@ -543,6 +522,7 @@
                 #cca-log::-webkit-scrollbar { width: 6px; }
                 #cca-log::-webkit-scrollbar-track { background: #1a1a2e; border-radius: 3px; }
                 #cca-log::-webkit-scrollbar-thumb { background: #0f3460; border-radius: 3px; }
+                .cca-hint { font-size: 10px; color: #666; margin-top: 2px; }
             </style>
             <div id="cca-panel">
                 <div id="cca-header">
@@ -579,13 +559,14 @@
                         </div>
                         <div class="cca-row">
                             <label>Buy Amount:</label>
-                            <input type="number" id="cca-buy-amount" class="cca-input" value="${state.settings.buyAmount}" min="1" max="1000">
+                            <input type="number" id="cca-buy-amount" class="cca-input" value="${state.settings.buyAmount}" min="0" max="1000">
                         </div>
+                        <div class="cca-hint">Set to 0 to only open existing cases</div>
                     </div>
 
                     <!-- Auto Sell Settings -->
                     <div class="cca-section">
-                        <div class="cca-section-title">Auto Sell (after each bulk open)</div>
+                        <div class="cca-section-title">Auto Sell (API)</div>
                         <div class="cca-row">
                             <label>Enable Auto Sell:</label>
                             <input type="checkbox" id="cca-auto-sell" class="cca-checkbox" ${state.settings.autoSellEnabled ? 'checked' : ''}>
@@ -616,8 +597,12 @@
                                 <span id="cca-stat-opened" class="cca-status-value">${state.stats.casesOpened}</span>
                             </div>
                             <div class="cca-status-item">
-                                <span class="cca-status-label">Sell Clicks:</span>
-                                <span id="cca-stat-sells" class="cca-status-value">${state.stats.sellClicks}</span>
+                                <span class="cca-status-label">Skins Sold:</span>
+                                <span id="cca-stat-sold" class="cca-status-value">${state.stats.skinsSold}</span>
+                            </div>
+                            <div class="cca-status-item">
+                                <span class="cca-status-label">Money Earned:</span>
+                                <span id="cca-stat-money" class="cca-status-value">$${state.stats.moneyEarned.toFixed(2)}</span>
                             </div>
                         </div>
                     </div>
@@ -658,7 +643,7 @@
         });
 
         document.getElementById('cca-buy-amount').addEventListener('change', (e) => {
-            state.settings.buyAmount = parseInt(e.target.value) || 10;
+            state.settings.buyAmount = parseInt(e.target.value) || 0;
             saveSettings();
         });
 
@@ -734,12 +719,14 @@
     function updateStatsPanel() {
         const bought = document.getElementById('cca-stat-bought');
         const opened = document.getElementById('cca-stat-opened');
-        const sells = document.getElementById('cca-stat-sells');
+        const sold = document.getElementById('cca-stat-sold');
+        const money = document.getElementById('cca-stat-money');
         const maxBulk = document.getElementById('cca-max-bulk');
 
         if (bought) bought.textContent = state.stats.casesBought;
         if (opened) opened.textContent = state.stats.casesOpened;
-        if (sells) sells.textContent = state.stats.sellClicks;
+        if (sold) sold.textContent = state.stats.skinsSold;
+        if (money) money.textContent = `$${state.stats.moneyEarned.toFixed(2)}`;
         if (maxBulk) maxBulk.textContent = state.settings.maxBulkOpen;
     }
 
@@ -760,7 +747,6 @@
         loadSettings();
         createUI();
         log('Case Clicker Assistant v' + CONFIG.VERSION + ' loaded', 'success');
-        log('Go to /inventory page for auto-sell to work', 'info');
 
         setInterval(() => {
             updateStatsPanel();
