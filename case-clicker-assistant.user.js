@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Case Clicker Assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.3.0
-// @description  Auto buy, open, and sell cases on case-clicker.com
+// @version      3.0.0
+// @description  Auto buy, open, sell cases & auto-favorite good floats on case-clicker.com
 // @author       You
 // @match        https://case-clicker.com/*
 // @icon         https://case-clicker.com/favicon.ico
@@ -14,7 +14,7 @@
 
     // ==================== CONFIGURATION ====================
     const CONFIG = {
-        VERSION: '2.3.0',
+        VERSION: '3.0.0',
         STORAGE_KEY: 'caseClickerAssistant',
         API_BASE: 'https://case-clicker.com/api',
         LOOP_DELAY: 300,
@@ -72,11 +72,19 @@
         isRunning: false,
         settings: {
             buyAmount: 0, // 0 = only open, don't buy
-            sellThreshold: 1.00,
-            sellMode: 'cash', // 'cash' | 'tokens'
+            sellThreshold: 500,
+            sellMode: 'money', // 'money' | 'tokens'
             maxBulkOpen: 10,
             selectedCaseId: CASE_LIST[0].id,
             autoSellEnabled: true,
+            // Auto-favorite settings
+            favoriteHighFloats: true,
+            favoriteLowFloats: true,
+            favoritePatterns: true,
+            favoriteCustomFloats: true,
+            customHighFloat: 0.99999,
+            customLowFloat: 0.0000001,
+            customSelectedFloats: ['0.123456', '0.987654', '0.42069', '0.666666', '0.1111111111', '0.2222222222', '0.3333333333', '0.4444444444', '0.5555555555', '0.777777777'],
         },
         stats: {
             casesBought: 0,
@@ -162,6 +170,18 @@
                 count: String(count),
                 useEventTickets: false,
                 caseOpenMultiplier: 1,
+                autoOpenConfig: {
+                    autosellActivated: state.settings.autoSellEnabled,
+                    autosellAmount: state.settings.sellThreshold,
+                    autosellVariant: state.settings.sellMode,
+                    favoriteHighFloats: state.settings.favoriteHighFloats,
+                    favoriteLowFloats: state.settings.favoriteLowFloats,
+                    favoritePatterns: state.settings.favoritePatterns,
+                    customHighFloat: state.settings.customHighFloat,
+                    customLowFloat: state.settings.customLowFloat,
+                    customSelectedFloats: state.settings.customSelectedFloats,
+                    favoriteCustomFloats: state.settings.favoriteCustomFloats,
+                },
             }),
         });
     }
@@ -279,7 +299,6 @@
 
                 // ===== STEP 2: OPEN ALL CASES UNTIL EMPTY =====
                 let openedThisRound = 0;
-                let openedSinceSell = 0;
 
                 while (state.isRunning && ownedAmount > 0) {
                     const toOpen = Math.min(ownedAmount, maxBulk);
@@ -296,9 +315,19 @@
                         }
 
                         openedThisRound += actualOpened;
-                        openedSinceSell += actualOpened;
                         ownedAmount -= actualOpened;
                         state.stats.casesOpened += actualOpened;
+
+                        // Track auto-sell stats from server response
+                        if (result?.autoSellInfo) {
+                            const soldCount = result.autoSellInfo.count || 0;
+                            const soldValue = result.autoSellInfo.cost || 0;
+                            if (soldCount > 0) {
+                                state.stats.skinsSold += soldCount;
+                                state.stats.moneyEarned += soldValue;
+                                log(`Auto-sold ${soldCount} items for $${soldValue.toFixed(2)}`, 'success');
+                            }
+                        }
 
                         if (result?.skins) {
                             const totalValue = result.skins.reduce((sum, s) => sum + (s.price || 0), 0);
@@ -308,21 +337,10 @@
                         updateStatsPanel();
                         await sleep(CONFIG.LOOP_DELAY);
 
-                        // ===== STEP 3: SELL EVERY 100 CASES OPENED =====
-                        if (openedSinceSell >= 100) {
-                            await performBulkSell();
-                            openedSinceSell = 0;
-                        }
-
                     } catch (openError) {
                         log(`Open failed: ${openError.message}`, 'warning');
                         break;
                     }
-                }
-
-                // Sell remaining after round ends
-                if (openedSinceSell > 0) {
-                    await performBulkSell();
                 }
 
                 // ===== STEP 4: BUY MORE CASES (if buyAmount > 0) =====
@@ -600,7 +618,7 @@
                         <div class="cca-row">
                             <label>Sell Mode:</label>
                             <select id="cca-sell-mode" class="cca-select">
-                                <option value="cash" ${state.settings.sellMode === 'cash' ? 'selected' : ''}>Cash</option>
+                                <option value="money" ${state.settings.sellMode === 'money' ? 'selected' : ''}>Cash</option>
                                 <option value="tokens" ${state.settings.sellMode === 'tokens' ? 'selected' : ''}>Tokens</option>
                             </select>
                         </div>
