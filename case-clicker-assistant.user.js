@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Case Clicker Assistant
 // @namespace    http://tampermonkey.net/
-// @version      2.1.0
+// @version      2.2.0
 // @description  Auto buy, open, and sell cases on case-clicker.com
 // @author       You
 // @match        https://case-clicker.com/*
@@ -14,7 +14,7 @@
 
     // ==================== CONFIGURATION ====================
     const CONFIG = {
-        VERSION: '2.1.0',
+        VERSION: '2.2.0',
         STORAGE_KEY: 'caseClickerAssistant',
         API_BASE: 'https://case-clicker.com/api',
         LOOP_DELAY: 300,
@@ -166,6 +166,16 @@
         });
     }
 
+    // Get owned case amounts from API
+    async function getOwnedCases() {
+        return apiRequest('/cases', { method: 'GET' });
+    }
+
+    function getOwnedAmount(ownedCases, caseId) {
+        const found = ownedCases.find(c => c._id === caseId);
+        return found?.amount || 0;
+    }
+
     // ==================== BULK SELL API ====================
     // DELETE /api/inventory {"type":"price","value":X,"currency":"money"} = sell for cash
     // PATCH /api/inventory {"type":"price","value":X,"currency":"money"} = sell for tokens
@@ -251,29 +261,42 @@
         }
 
         const maxBulk = state.settings.maxBulkOpen;
-        let consecutiveEmptyOpens = 0;
 
         while (state.isRunning) {
             try {
-                // ===== STEP 1: OPEN ALL CASES UNTIL EMPTY =====
+                // ===== STEP 1: CHECK OWNED CASES =====
+                let ownedCases;
+                try {
+                    ownedCases = await getOwnedCases();
+                } catch (e) {
+                    log(`Failed to fetch owned cases: ${e.message}`, 'error');
+                    await sleep(1000);
+                    continue;
+                }
+
+                let ownedAmount = getOwnedAmount(ownedCases, caseId);
+                log(`Owned ${selectedCase.name}: ${ownedAmount}`);
+
+                // ===== STEP 2: OPEN ALL CASES UNTIL EMPTY =====
                 let openedThisRound = 0;
 
-                while (state.isRunning) {
-                    log(`Opening ${maxBulk} cases...`);
-                    updateStatus(`Opening cases... (${state.stats.casesOpened} total)`);
+                while (state.isRunning && ownedAmount > 0) {
+                    const toOpen = Math.min(ownedAmount, maxBulk);
+                    log(`Opening ${toOpen} cases... (${ownedAmount} remaining)`);
+                    updateStatus(`Opening ${toOpen} cases...`);
 
                     try {
-                        const result = await openCases(caseId, maxBulk);
+                        const result = await openCases(caseId, toOpen);
                         const actualOpened = result?.skins?.length || 0;
 
                         if (actualOpened === 0) {
-                            log('No cases to open - out of cases', 'info');
-                            break; // Exit open loop
+                            log('No cases opened - API returned 0', 'warning');
+                            break;
                         }
 
                         openedThisRound += actualOpened;
+                        ownedAmount -= actualOpened;
                         state.stats.casesOpened += actualOpened;
-                        consecutiveEmptyOpens = 0;
 
                         if (result?.skins) {
                             const totalValue = result.skins.reduce((sum, s) => sum + (s.price || 0), 0);
@@ -283,17 +306,16 @@
                         updateStatsPanel();
                         await sleep(CONFIG.LOOP_DELAY);
 
-                        // ===== STEP 2: SELL AFTER EACH BULK OPEN =====
-                        const sellResult = await performBulkSell();
-                        // Continue regardless of sell result
+                        // ===== STEP 3: SELL AFTER EACH BULK OPEN =====
+                        await performBulkSell();
 
                     } catch (openError) {
                         log(`Open failed: ${openError.message}`, 'warning');
-                        break; // Exit open loop, try to buy more
+                        break;
                     }
                 }
 
-                // ===== STEP 3: BUY MORE CASES (if buyAmount > 0) =====
+                // ===== STEP 4: BUY MORE CASES (if buyAmount > 0) =====
                 if (state.settings.buyAmount > 0) {
                     const toBuy = state.settings.buyAmount;
                     log(`Buying ${toBuy} cases...`);
@@ -304,31 +326,21 @@
                         state.stats.casesBought += toBuy;
                         log(`Bought ${toBuy} cases`, 'success');
                         updateStatsPanel();
-                        consecutiveEmptyOpens = 0;
                     } catch (buyError) {
                         log(`Buy failed: ${buyError.message}`, 'error');
-                        // If we couldn't open AND couldn't buy, we should stop
+                        // If we couldn't open anything AND couldn't buy, stop
                         if (openedThisRound === 0) {
-                            consecutiveEmptyOpens++;
-                            if (consecutiveEmptyOpens >= 2) {
-                                log('No cases to open and buying failed - stopping', 'error');
-                                stopScript();
-                                return;
-                            }
-                        }
-                    }
-                } else {
-                    // buyAmount is 0, so we're in "open only" mode
-                    if (openedThisRound === 0) {
-                        consecutiveEmptyOpens++;
-                        if (consecutiveEmptyOpens >= 2) {
-                            log('No more cases to open - stopping (buy amount is 0)', 'info');
+                            log('No cases to open and buying failed - stopping', 'error');
                             stopScript();
                             return;
                         }
-                        // Wait a bit before retrying
-                        log('Waiting for more cases...', 'info');
-                        await sleep(2000);
+                    }
+                } else {
+                    // buyAmount is 0 = "open only" mode
+                    if (openedThisRound === 0) {
+                        log('No more cases to open - stopping (buy amount is 0)', 'info');
+                        stopScript();
+                        return;
                     }
                 }
 
